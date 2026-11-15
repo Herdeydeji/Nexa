@@ -191,8 +191,8 @@ fun SettingsScreen(
                     )
                     SettingsDivider()
                     SettingsActionRow(
-                        title = "Max steps per autonomous task",
-                        value = "${settings.maxStepsPerTask} steps",
+                        title = "Max reasoning iterations",
+                        value = "${settings.maxStepsPerTask} turns",
                         onClick = {
                             viewModel.update {
                                 val next = when (it.maxStepsPerTask) {
@@ -201,6 +201,50 @@ fun SettingsScreen(
                                     else -> 8
                                 }
                                 it.copy(maxStepsPerTask = next)
+                            }
+                        }
+                    )
+                    SettingsDivider()
+                    SettingsActionRow(
+                        title = "Max tool calls per task",
+                        value = "${settings.maxToolCallsPerTask} calls",
+                        onClick = {
+                            viewModel.update {
+                                val next = when (it.maxToolCallsPerTask) {
+                                    6 -> 12
+                                    12 -> 24
+                                    else -> 6
+                                }
+                                it.copy(maxToolCallsPerTask = next)
+                            }
+                        }
+                    )
+                    SettingsDivider()
+                    SettingsActionRow(
+                        title = "Per-tool & task timeout",
+                        value = "${settings.toolTimeoutSeconds}s tool · ${settings.taskTimeoutSeconds}s task",
+                        onClick = {
+                            viewModel.update {
+                                when (it.toolTimeoutSeconds) {
+                                    10 -> it.copy(toolTimeoutSeconds = 20, taskTimeoutSeconds = 180)
+                                    20 -> it.copy(toolTimeoutSeconds = 30, taskTimeoutSeconds = 300)
+                                    else -> it.copy(toolTimeoutSeconds = 10, taskTimeoutSeconds = 120)
+                                }
+                            }
+                        }
+                    )
+                    SettingsDivider()
+                    SettingsActionRow(
+                        title = "Max tool output buffer",
+                        value = "${settings.maxToolResultChars} chars",
+                        onClick = {
+                            viewModel.update {
+                                val next = when (it.maxToolResultChars) {
+                                    4000 -> 8000
+                                    8000 -> 16000
+                                    else -> 4000
+                                }
+                                it.copy(maxToolResultChars = next)
                             }
                         }
                     )

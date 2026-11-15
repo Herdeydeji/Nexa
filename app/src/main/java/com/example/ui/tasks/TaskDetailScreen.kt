@@ -133,10 +133,14 @@ fun TaskDetailScreen(
                     NoticeBanner(
                         icon = Icons.Outlined.Info,
                         text = state.phase1Notice
-                            ?: "Sample execution timeline for UI verification. Real task execution begins in Phase 2."
+                            ?: "Sample execution timeline for UI verification. Real tool-assisted tasks appear automatically when invoked in Chat."
                     )
                 }
             }
+
+            val isThisTaskLiveRunning = !currentTask.isSampleData &&
+                state.activeRunState.activeTaskId == currentTask.id &&
+                state.activeRunState.isRunning
 
             item(key = "overview") {
                 NexaSurfaceCard(borderColor = NexaBorder) {
@@ -167,16 +171,56 @@ fun TaskDetailScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
-                        MetadataField("Target App", currentTask.targetApp ?: "General", Modifier.weight(1f))
+                        MetadataField("Target Runtime", currentTask.targetApp ?: "Nexa Tools", Modifier.weight(1f))
                         MetadataField("Model", currentTask.modelLabel, Modifier.weight(1f))
                     }
+                    if (isThisTaskLiveRunning) {
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    if (state.activeRunState.isPaused) {
+                                        viewModel.resumeLiveTask()
+                                    } else {
+                                        viewModel.pauseLiveTask()
+                                    }
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("task_pause_resume_button")
+                            ) {
+                                Text(if (state.activeRunState.isPaused) "Resume" else "Pause")
+                            }
+                            OutlinedButton(
+                                onClick = viewModel::cancelLiveTask,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("task_cancel_button")
+                            ) {
+                                Text("Cancel", color = NexaError)
+                            }
+                        }
+                    }
+                }
+            }
+
+            currentTask.verificationSummary?.let { verification ->
+                item(key = "verification") {
+                    NoticeBanner(
+                        icon = Icons.Outlined.Info,
+                        text = verification.summaryNote,
+                        accentColor = if (verification.isVerified) com.example.ui.theme.NexaSuccess else com.example.ui.theme.NexaWarning
+                    )
                 }
             }
 
             if (currentTask.requiredCapabilities.isNotEmpty()) {
                 item(key = "capabilities") {
                     NexaSurfaceCard(borderColor = NexaBorder) {
-                        SectionHeader(title = "Required Capabilities")
+                        SectionHeader(title = "Tools & Capabilities")
                         Spacer(modifier = Modifier.height(10.dp))
                         FlowRow(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -212,7 +256,18 @@ fun TaskDetailScreen(
                 }
             }
 
-            if (currentTask.status == AgentTaskStatus.AWAITING_APPROVAL) {
+            val liveApproval = state.activeRunState.pendingApproval?.takeIf { it.taskId == currentTask.id }
+            if (liveApproval != null) {
+                item(key = "live_approval_actions") {
+                    com.example.ui.components.ApprovalGateCard(
+                        request = liveApproval,
+                        onApprove = { viewModel.approveLiveToolCall(liveApproval.callId) },
+                        onReject = { viewModel.rejectLiveToolCall(liveApproval.callId) },
+                        approveTestTag = "task_approve_button",
+                        rejectTestTag = "task_reject_button"
+                    )
+                }
+            } else if (currentTask.isSampleData && currentTask.status == AgentTaskStatus.AWAITING_APPROVAL) {
                 item(key = "approval_actions") {
                     NexaSurfaceCard(borderColor = NexaOrange.copy(alpha = 0.45f)) {
                         SectionHeader(

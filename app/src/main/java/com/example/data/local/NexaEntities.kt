@@ -10,7 +10,10 @@ import com.example.domain.model.ExecutionPlan
 import com.example.domain.model.ExecutionStepState
 import com.example.domain.model.MessageRole
 import com.example.domain.model.MessageStatus
+import com.example.domain.model.StepKind
 import com.example.domain.model.TaskSummary
+import com.example.domain.model.TaskVerificationSummary
+import com.example.domain.model.ToolCall
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
@@ -53,7 +56,11 @@ data class MessageEntity(
     val modelLabel: String? = null,
     val promptTokens: Int? = null,
     val completionTokens: Int? = null,
-    val totalTokens: Int? = null
+    val totalTokens: Int? = null,
+    val toolCallsJson: String? = null,
+    val toolCallId: String? = null,
+    val toolName: String? = null,
+    val verificationJson: String? = null
 )
 
 @Entity(tableName = "agent_tasks")
@@ -69,7 +76,9 @@ data class AgentTaskEntity(
     val requiredCapabilitiesJson: String,
     val failureReason: String?,
     val createdAtMillis: Long,
-    val updatedAtMillis: Long
+    val updatedAtMillis: Long,
+    val summaryMessage: String? = null,
+    val verificationJson: String? = null
 )
 
 @Entity(
@@ -92,7 +101,8 @@ data class TaskStepEntity(
     val detail: String,
     val state: ExecutionStepState,
     val toolName: String?,
-    val timestampLabel: String?
+    val timestampLabel: String?,
+    val kind: StepKind = StepKind.EXECUTED
 )
 
 class NexaTypeConverters {
@@ -102,15 +112,20 @@ class NexaTypeConverters {
 
     private val planAdapter = moshi.adapter(ExecutionPlan::class.java)
     private val summaryAdapter = moshi.adapter(TaskSummary::class.java)
+    private val verificationAdapter = moshi.adapter(TaskVerificationSummary::class.java)
     private val stringListAdapter = moshi.adapter<List<String>>(
         Types.newParameterizedType(List::class.java, String::class.java)
+    )
+    private val toolCallListAdapter = moshi.adapter<List<ToolCall>>(
+        Types.newParameterizedType(List::class.java, ToolCall::class.java)
     )
 
     @TypeConverter
     fun fromMessageRole(role: MessageRole): String = role.name
 
     @TypeConverter
-    fun toMessageRole(value: String): MessageRole = MessageRole.valueOf(value)
+    fun toMessageRole(value: String): MessageRole =
+        runCatching { MessageRole.valueOf(value) }.getOrDefault(MessageRole.USER)
 
     @TypeConverter
     fun fromMessageStatus(status: MessageStatus): String = status.name
@@ -123,13 +138,22 @@ class NexaTypeConverters {
     fun fromTaskStatus(status: AgentTaskStatus): String = status.name
 
     @TypeConverter
-    fun toTaskStatus(value: String): AgentTaskStatus = AgentTaskStatus.valueOf(value)
+    fun toTaskStatus(value: String): AgentTaskStatus =
+        runCatching { AgentTaskStatus.valueOf(value) }.getOrDefault(AgentTaskStatus.FAILED)
 
     @TypeConverter
     fun fromStepState(state: ExecutionStepState): String = state.name
 
     @TypeConverter
-    fun toStepState(value: String): ExecutionStepState = ExecutionStepState.valueOf(value)
+    fun toStepState(value: String): ExecutionStepState =
+        runCatching { ExecutionStepState.valueOf(value) }.getOrDefault(ExecutionStepState.FAILED)
+
+    @TypeConverter
+    fun fromStepKind(kind: StepKind): String = kind.name
+
+    @TypeConverter
+    fun toStepKind(value: String): StepKind =
+        runCatching { StepKind.valueOf(value) }.getOrDefault(StepKind.EXECUTED)
 
     fun encodeExecutionPlan(plan: ExecutionPlan?): String? = plan?.let { planAdapter.toJson(it) }
     fun decodeExecutionPlan(json: String?): ExecutionPlan? =
@@ -138,6 +162,18 @@ class NexaTypeConverters {
     fun encodeTaskSummary(summary: TaskSummary?): String? = summary?.let { summaryAdapter.toJson(it) }
     fun decodeTaskSummary(json: String?): TaskSummary? =
         json?.let { runCatching { summaryAdapter.fromJson(it) }.getOrNull() }
+
+    fun encodeVerificationSummary(summary: TaskVerificationSummary?): String? =
+        summary?.let { verificationAdapter.toJson(it) }
+
+    fun decodeVerificationSummary(json: String?): TaskVerificationSummary? =
+        json?.let { runCatching { verificationAdapter.fromJson(it) }.getOrNull() }
+
+    fun encodeToolCalls(calls: List<ToolCall>): String? =
+        if (calls.isEmpty()) null else toolCallListAdapter.toJson(calls)
+
+    fun decodeToolCalls(json: String?): List<ToolCall> =
+        json?.let { runCatching { toolCallListAdapter.fromJson(it) }.getOrNull() } ?: emptyList()
 
     fun encodeStringList(list: List<String>): String = stringListAdapter.toJson(list)
     fun decodeStringList(json: String?): List<String> =

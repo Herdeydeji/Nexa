@@ -86,6 +86,7 @@ data class ProviderConfig(
     val availableModels: List<AiModelInfo>,
     val isConnected: Boolean = false,
     val credentialInvalidated: Boolean = false,
+    val allowManualToolsOverride: Boolean = false,
     val connectionStatus: ProviderConnectionStatus = when {
         credentialInvalidated -> ProviderConnectionStatus.KeyInvalidated(
             "Stored key could not be decrypted. Re-enter your API key."
@@ -108,6 +109,9 @@ data class ProviderConfig(
                     isCatalogVerified = false
                 )
             }
+
+    val effectiveSupportsTools: Boolean
+        get() = selectedModelInfo?.supportsTools == true || allowManualToolsOverride
 }
 
 enum class TelegramConnectionStatus(val label: String) {

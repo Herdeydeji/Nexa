@@ -50,7 +50,8 @@ data class StoredProviderEntry(
     val statusKind: StoredStatusKind = StoredStatusKind.NONE,
     val statusMessage: String = "",
     val modelCount: Int? = null,
-    val credentialInvalidated: Boolean = false
+    val credentialInvalidated: Boolean = false,
+    val allowManualToolsOverride: Boolean = false
 )
 
 class NexaPreferencesDataStore(
@@ -96,7 +97,8 @@ class NexaPreferencesDataStore(
                 statusKind = effectiveKind,
                 statusMessage = effectiveMsg,
                 modelCount = prefs[providerIntKey(type, "model_count")],
-                credentialInvalidated = keyInvalidated
+                credentialInvalidated = keyInvalidated,
+                allowManualToolsOverride = prefs[providerBoolKey(type, "allow_manual_tools")] ?: false
             )
         }
     }
@@ -112,7 +114,7 @@ class NexaPreferencesDataStore(
             allowRemotePrompts = prefs[KEY_TG_REMOTE_PROMPTS] ?: false,
             requireDeviceApproval = prefs[KEY_TG_REQUIRE_APPROVAL] ?: true,
             shareTaskSummaries = prefs[KEY_TG_SHARE_SUMMARIES] ?: false,
-            statusNote = prefs[KEY_TG_NOTE] ?: "No active Telegram bridge. Scheduled for Phase 3."
+            statusNote = prefs[KEY_TG_NOTE] ?: "No active Telegram bridge. Scheduled for Phase 4."
         )
     }
 
@@ -138,7 +140,8 @@ class NexaPreferencesDataStore(
         baseUrl: String,
         selectedModelId: String?,
         manualModelId: String? = null,
-        setAsDefault: Boolean
+        setAsDefault: Boolean,
+        allowManualToolsOverride: Boolean? = null
     ) {
         dataStore.edit { prefs ->
             val keyChanged = !rawApiKey.isNullOrBlank()
@@ -159,6 +162,9 @@ class NexaPreferencesDataStore(
                 } else {
                     prefs.remove(providerKey(type, "manual_model"))
                 }
+            }
+            if (allowManualToolsOverride != null) {
+                prefs[providerBoolKey(type, "allow_manual_tools")] = allowManualToolsOverride
             }
             if (keyChanged || urlChanged) {
                 prefs[providerKey(type, "status_kind")] = StoredStatusKind.NONE.name
@@ -212,6 +218,12 @@ class NexaPreferencesDataStore(
             prefs.remove(providerKey(type, "status_msg"))
             prefs.remove(providerIntKey(type, "model_count"))
             prefs.remove(providerKey(type, "cached_models"))
+            prefs.remove(providerBoolKey(type, "allow_manual_tools"))
+            if (type.requiresBaseUrl) {
+                prefs.remove(providerKey(type, "url"))
+                prefs.remove(providerKey(type, "model"))
+                prefs.remove(providerKey(type, "manual_model"))
+            }
             if (prefs[KEY_DEFAULT_PROVIDER] == type.id) {
                 prefs.remove(KEY_DEFAULT_PROVIDER)
             }
@@ -237,7 +249,7 @@ class NexaPreferencesDataStore(
             prefs[KEY_TG_HANDLE] = pairingHandle.trim()
             prefs[KEY_TG_STATUS] = TelegramConnectionStatus.PAIRING_PENDING.name
             prefs[KEY_TG_NOTE] =
-                "Bot draft stored locally ($masked). Telegram gateway is scheduled for Phase 3 — not yet active."
+                "Bot draft stored locally ($masked). Telegram gateway is scheduled for Phase 4 — not yet active."
         }
     }
 
@@ -260,7 +272,7 @@ class NexaPreferencesDataStore(
             prefs.remove(KEY_TG_HANDLE)
             prefs[KEY_TG_STATUS] = TelegramConnectionStatus.DISCONNECTED.name
             prefs[KEY_TG_REMOTE_PROMPTS] = false
-            prefs[KEY_TG_NOTE] = "No active Telegram bridge. Scheduled for Phase 3."
+            prefs[KEY_TG_NOTE] = "No active Telegram bridge. Scheduled for Phase 4."
         }
     }
 
@@ -282,6 +294,10 @@ class NexaPreferencesDataStore(
             prefs[KEY_VERBOSITY] = latest.responseVerbosity.name
             prefs[KEY_AUTO_EXPAND_EXEC] = latest.autoExpandExecutionPanel
             prefs[KEY_MAX_STEPS] = latest.maxStepsPerTask
+            prefs[KEY_MAX_TOOL_CALLS] = latest.maxToolCallsPerTask
+            prefs[KEY_TOOL_TIMEOUT_SEC] = latest.toolTimeoutSeconds
+            prefs[KEY_TASK_TIMEOUT_SEC] = latest.taskTimeoutSeconds
+            prefs[KEY_MAX_TOOL_RESULT_CHARS] = latest.maxToolResultChars
             prefs[KEY_CUSTOM_SYSTEM_PROMPT] = latest.customSystemPrompt
             prefs[KEY_BG_QUEUE] = latest.allowBackgroundTaskQueue
             prefs[KEY_APP_SUGGESTIONS] = latest.allowAppLaunchSuggestions
@@ -309,7 +325,11 @@ class NexaPreferencesDataStore(
             ResponseVerbosity.valueOf(prefs[KEY_VERBOSITY] ?: ResponseVerbosity.BALANCED.name)
         }.getOrDefault(ResponseVerbosity.BALANCED),
         autoExpandExecutionPanel = prefs[KEY_AUTO_EXPAND_EXEC] ?: true,
-        maxStepsPerTask = prefs[KEY_MAX_STEPS] ?: 12,
+        maxStepsPerTask = prefs[KEY_MAX_STEPS] ?: 8,
+        maxToolCallsPerTask = prefs[KEY_MAX_TOOL_CALLS] ?: 12,
+        toolTimeoutSeconds = prefs[KEY_TOOL_TIMEOUT_SEC] ?: 10,
+        taskTimeoutSeconds = prefs[KEY_TASK_TIMEOUT_SEC] ?: 120,
+        maxToolResultChars = prefs[KEY_MAX_TOOL_RESULT_CHARS] ?: 8_000,
         customSystemPrompt = prefs[KEY_CUSTOM_SYSTEM_PROMPT] ?: "",
         allowBackgroundTaskQueue = prefs[KEY_BG_QUEUE] ?: false,
         allowAppLaunchSuggestions = prefs[KEY_APP_SUGGESTIONS] ?: true,
@@ -332,6 +352,9 @@ class NexaPreferencesDataStore(
     private fun providerIntKey(type: AiProviderType, field: String) =
         intPreferencesKey("provider_${type.id}_$field")
 
+    private fun providerBoolKey(type: AiProviderType, field: String) =
+        booleanPreferencesKey("provider_${type.id}_$field")
+
     private companion object {
         val KEY_DEFAULT_PROVIDER = stringPreferencesKey("default_provider_id")
         val KEY_TG_STATUS = stringPreferencesKey("tg_status")
@@ -351,6 +374,10 @@ class NexaPreferencesDataStore(
         val KEY_VERBOSITY = stringPreferencesKey("set_verbosity")
         val KEY_AUTO_EXPAND_EXEC = booleanPreferencesKey("set_auto_expand_exec")
         val KEY_MAX_STEPS = intPreferencesKey("set_max_steps")
+        val KEY_MAX_TOOL_CALLS = intPreferencesKey("set_max_tool_calls")
+        val KEY_TOOL_TIMEOUT_SEC = intPreferencesKey("set_tool_timeout_sec")
+        val KEY_TASK_TIMEOUT_SEC = intPreferencesKey("set_task_timeout_sec")
+        val KEY_MAX_TOOL_RESULT_CHARS = intPreferencesKey("set_max_tool_result_chars")
         val KEY_CUSTOM_SYSTEM_PROMPT = stringPreferencesKey("set_custom_system_prompt")
         val KEY_BG_QUEUE = booleanPreferencesKey("set_bg_queue")
         val KEY_APP_SUGGESTIONS = booleanPreferencesKey("set_app_suggestions")

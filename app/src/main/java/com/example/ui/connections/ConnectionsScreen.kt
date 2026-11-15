@@ -149,7 +149,7 @@ fun ConnectionsScreen(
                 config = currentConfig,
                 isRefreshingModels = targetType in state.refreshingProviders,
                 refreshError = state.refreshErrors[targetType],
-                onSave = { rawKey, baseUrl, modelId, manualModelId, setDefault ->
+                onSave = { rawKey, baseUrl, modelId, manualModelId, setDefault, allowManualTools ->
                     viewModel.saveProviderConfig(
                         type = targetType,
                         rawApiKey = rawKey,
@@ -157,7 +157,8 @@ fun ConnectionsScreen(
                         selectedModelId = modelId,
                         manualModelId = manualModelId,
                         setAsDefault = setDefault,
-                        hasExistingKey = currentConfig.hasApiKey
+                        hasExistingKey = currentConfig.hasApiKey,
+                        allowManualToolsOverride = allowManualTools
                     )
                 },
                 onRefreshModels = { viewModel.refreshProviderModels(currentConfig) },

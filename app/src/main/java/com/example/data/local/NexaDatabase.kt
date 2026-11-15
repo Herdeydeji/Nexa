@@ -7,6 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.example.domain.model.AgentTaskStatus
 
 @Database(
     entities = [
@@ -15,7 +16,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         AgentTaskEntity::class,
         TaskStepEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 @TypeConverters(NexaTypeConverters::class)
@@ -27,8 +28,18 @@ abstract class NexaDatabase : RoomDatabase() {
         val convDao = conversationDao()
         val tDao = taskDao()
         val now = System.currentTimeMillis()
-        // Phase 2 removes the static Phase 1 YouTube chat preview so Chat launches cleanly into live AI chat.
         convDao.removePreviewConversations()
+        // Any live task left in RUNNING/AWAITING_APPROVAL/PAUSED from a killed process is reconciled honestly.
+        tDao.getActiveLiveTasks().forEach { stale ->
+            tDao.updateTaskOutcome(
+                taskId = stale.id,
+                status = AgentTaskStatus.FAILED,
+                failureReason = "Interrupted before completion when the app restarted.",
+                summaryMessage = stale.summaryMessage,
+                verificationJson = stale.verificationJson,
+                updatedAt = now
+            )
+        }
         if (tDao.countTasks() == 0) {
             SampleSeedData.buildSampleTasks(now, converters).forEach { (task, steps) ->
                 tDao.insertTaskWithSteps(task, steps)
@@ -49,13 +60,25 @@ abstract class NexaDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_2_3: Migration = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE messages ADD COLUMN toolCallsJson TEXT")
+                db.execSQL("ALTER TABLE messages ADD COLUMN toolCallId TEXT")
+                db.execSQL("ALTER TABLE messages ADD COLUMN toolName TEXT")
+                db.execSQL("ALTER TABLE messages ADD COLUMN verificationJson TEXT")
+                db.execSQL("ALTER TABLE agent_tasks ADD COLUMN summaryMessage TEXT")
+                db.execSQL("ALTER TABLE agent_tasks ADD COLUMN verificationJson TEXT")
+                db.execSQL("ALTER TABLE task_steps ADD COLUMN kind TEXT NOT NULL DEFAULT 'EXECUTED'")
+            }
+        }
+
         fun build(context: Context): NexaDatabase {
             return Room.databaseBuilder(
                 context.applicationContext,
                 NexaDatabase::class.java,
                 "nexa_phase1.db"
             )
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build()
         }
     }

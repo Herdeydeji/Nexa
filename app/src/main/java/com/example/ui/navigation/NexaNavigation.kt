@@ -102,11 +102,17 @@ fun NexaAppShell(
             toolRegistry = container.toolRegistry,
             systemPromptBuilder = container.systemPromptBuilder,
             contextBuilder = container.contextBuilder,
-            attachmentProcessor = container.attachmentProcessor
+            attachmentProcessor = container.attachmentProcessor,
+            taskRepository = container.taskRepository,
+            autonomousOrchestrator = container.autonomousAgentOrchestrator,
+            agentRunController = container.agentRunController
         )
     )
     val tasksViewModel: TasksViewModel = viewModel(
-        factory = TasksViewModel.Factory(container.taskRepository)
+        factory = TasksViewModel.Factory(
+            taskRepository = container.taskRepository,
+            agentRunController = container.agentRunController
+        )
     )
     val connectionsViewModel: ConnectionsViewModel = viewModel(
         factory = ConnectionsViewModel.Factory(container.connectionsRepository)

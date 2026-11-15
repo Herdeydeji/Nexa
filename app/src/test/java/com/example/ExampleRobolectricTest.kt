@@ -3,9 +3,13 @@ package com.example
 import android.content.Context
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.test.performTextInput
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.NexaDatabase
@@ -136,5 +140,38 @@ class ExampleRobolectricTest {
         composeRule.onNodeWithTag("settings_list").assertIsDisplayed()
 
         assertFalse(false)
+    }
+
+    @Test
+    fun `provider config sheet filters models by search query`() {
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("nav_tab_connections").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithTag("providers_list")
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        composeRule.onNodeWithTag("providers_list").performScrollToIndex(2)
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithTag("provider_card_openrouter")
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+
+        composeRule.onNodeWithTag("provider_card_openrouter").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithTag("provider_model_search_input")
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+
+        composeRule.onNodeWithTag("provider_model_search_input").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("provider_model_search_input").performTextInput("deepseek")
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("provider_save_button").performScrollTo()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("DeepSeek R1 (OR)").assertIsDisplayed()
+        composeRule.onNodeWithText("Claude Sonnet 4 (OR)").assertDoesNotExist()
     }
 }

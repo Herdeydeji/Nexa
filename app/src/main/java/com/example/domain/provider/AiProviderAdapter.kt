@@ -6,6 +6,8 @@ import com.example.domain.model.AttachmentPayload
 import com.example.domain.model.ChatMessage
 import com.example.domain.model.ProviderConfig
 import com.example.domain.model.TokenUsage
+import com.example.domain.model.ToolCall
+import com.example.domain.model.ToolDefinition
 import kotlinx.coroutines.flow.Flow
 
 data class ProviderRequest(
@@ -15,13 +17,16 @@ data class ProviderRequest(
     val attachments: List<AttachmentPayload> = emptyList(),
     val modelInfo: AiModelInfo? = null,
     val temperature: Double = 0.2,
-    val maxTokens: Int? = null
+    val maxTokens: Int? = null,
+    val tools: List<ToolDefinition> = emptyList(),
+    val allowTools: Boolean = false
 )
 
 sealed interface ProviderResponse {
     data class Text(
         val content: String,
-        val usage: TokenUsage? = null
+        val usage: TokenUsage? = null,
+        val toolCalls: List<ToolCall> = emptyList()
     ) : ProviderResponse
 
     data class Error(val error: ProviderError) : ProviderResponse
@@ -38,6 +43,16 @@ sealed interface ConnectionTestResult {
 
 sealed interface ProviderStreamEvent {
     data class Delta(val text: String) : ProviderStreamEvent
+    data class ToolCallDelta(
+        val index: Int,
+        val id: String? = null,
+        val name: String? = null,
+        val argumentsDelta: String = ""
+    ) : ProviderStreamEvent
+    data class ToolCallsCompleted(
+        val toolCalls: List<ToolCall>,
+        val usage: TokenUsage? = null
+    ) : ProviderStreamEvent
     data class Usage(val usage: TokenUsage) : ProviderStreamEvent
     data class Completed(val usage: TokenUsage? = null) : ProviderStreamEvent
     data class Failed(val error: ProviderError) : ProviderStreamEvent
@@ -72,10 +87,17 @@ interface AiProviderAdapter {
         val builder = StringBuilder()
         var latestUsage: TokenUsage? = null
         var failure: ProviderError? = null
+        val collectedToolCalls = mutableListOf<ToolCall>()
 
         streamChat(config, rawApiKey, request).collect { event ->
             when (event) {
                 is ProviderStreamEvent.Delta -> builder.append(event.text)
+                is ProviderStreamEvent.ToolCallDelta -> Unit
+                is ProviderStreamEvent.ToolCallsCompleted -> {
+                    collectedToolCalls.clear()
+                    collectedToolCalls.addAll(event.toolCalls)
+                    if (event.usage != null) latestUsage = event.usage
+                }
                 is ProviderStreamEvent.Usage -> latestUsage = event.usage
                 is ProviderStreamEvent.Completed -> if (event.usage != null) latestUsage = event.usage
                 is ProviderStreamEvent.Failed -> failure = event.error
@@ -86,7 +108,11 @@ interface AiProviderAdapter {
         return if (err != null) {
             ProviderResponse.Error(err)
         } else {
-            ProviderResponse.Text(builder.toString(), latestUsage)
+            ProviderResponse.Text(
+                content = builder.toString(),
+                usage = latestUsage,
+                toolCalls = collectedToolCalls.toList()
+            )
         }
     }
 }

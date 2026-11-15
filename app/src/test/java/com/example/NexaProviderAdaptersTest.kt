@@ -1,12 +1,28 @@
 package com.example
 
+import android.content.Context
+import androidx.room.Room
+import androidx.test.core.app.ApplicationProvider
+import com.example.data.local.NexaDatabase
+import com.example.data.local.NexaPreferencesDataStore
+import com.example.data.local.NexaTypeConverters
+import com.example.data.repository.ChatRepository
+import com.example.data.repository.ConnectionsRepository
+import com.example.data.repository.SettingsRepository
+import com.example.domain.agent.AndroidCapabilityInspector
+import com.example.domain.agent.DefaultToolRegistry
+import com.example.domain.chat.AndroidAttachmentProcessor
+import com.example.domain.chat.ConversationContextBuilder
+import com.example.domain.chat.SystemPromptBuilder
 import com.example.domain.model.AiModelInfo
 import com.example.domain.model.AiProviderType
 import com.example.domain.model.AttachmentPayload
 import com.example.domain.model.ChatMessage
 import com.example.domain.model.MessageRole
+import com.example.domain.model.MessageStatus
 import com.example.domain.model.ProviderConfig
 import com.example.domain.provider.AiProviderAdapter
+import com.example.domain.provider.AiProviderRegistry
 import com.example.domain.provider.AnthropicProviderAdapter
 import com.example.domain.provider.ConnectionTestResult
 import com.example.domain.provider.CustomOpenAiProviderAdapter
@@ -19,8 +35,21 @@ import com.example.domain.provider.ProviderError
 import com.example.domain.provider.ProviderRequest
 import com.example.domain.provider.ProviderResponse
 import com.example.domain.provider.ProviderStreamEvent
+import com.example.domain.security.CredentialCipher
+import com.example.ui.chat.ChatViewModel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -34,8 +63,13 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 import java.net.SocketTimeoutException
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [36])
 class NexaProviderAdaptersTest {
 
     private data class RecordedHttpCall(
@@ -361,6 +395,188 @@ class NexaProviderAdaptersTest {
             clientWithTransport(MockTransport { jsonResponse(it.url, 200, "<html>not json</html>") })
         ).testConfiguration(baseConfig(AiProviderType.CUSTOM, "model", baseUrl = "https://custom.example.com/v1"), "")
         assertTrue((errorMalformed as ConnectionTestResult.Failure).error is ProviderError.MalformedResponse)
+
+        val errorModel404 = OpenAiProviderAdapter(
+            clientWithTransport(MockTransport { jsonResponse(it.url, 404, """{"error":{"message":"The model 'bad-model' does not exist"}}""") })
+        ).generate(baseConfig(AiProviderType.OPENAI, "bad-model"), "sk-proj-1234567890", ProviderRequest("bad-model", listOf(userMsg("hi")), "sys"))
+        assertTrue((errorModel404 as ProviderResponse.Error).error is ProviderError.UnsupportedModel)
+    }
+
+    @Test
+    fun `streaming cancellation propagates CancellationException cleanly`() = runTest {
+        val adapter = OpenRouterProviderAdapter(
+            clientWithTransport(
+                MockTransport { call ->
+                    sseResponse(
+                        call.url,
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"First \"}}]}\n\n" +
+                            "data: {\"choices\":[{\"delta\":{\"content\":\"Second\"}}]}\n\n"
+                    )
+                }
+            )
+        )
+        val firstChunkArrived = CompletableDeferred<Unit>()
+        var sawCancellation = false
+        val job = launch {
+            try {
+                adapter.streamChat(
+                    baseConfig(AiProviderType.OPENROUTER, "anthropic/claude-sonnet-4"),
+                    "sk-or-v1-testsecretkey",
+                    ProviderRequest("anthropic/claude-sonnet-4", listOf(userMsg("Stream")), "sys")
+                ).collect { event ->
+                    if (event is ProviderStreamEvent.Delta) {
+                        firstChunkArrived.complete(Unit)
+                        kotlinx.coroutines.delay(5_000)
+                    }
+                }
+            } catch (_: CancellationException) {
+                sawCancellation = true
+            }
+        }
+        firstChunkArrived.await()
+        job.cancel()
+        job.join()
+        assertTrue(sawCancellation)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `chat viewmodel sends multi-turn context streams without duplicates and retries stopped reply cleanly`() = runTest {
+        val mainDispatcher = UnconfinedTestDispatcher(testScheduler)
+        Dispatchers.setMain(mainDispatcher)
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, NexaDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        val converters = NexaTypeConverters()
+        val fakeCipher = object : CredentialCipher {
+            override fun encrypt(plainText: String): String = "enc:$plainText"
+            override fun decrypt(cipherPayload: String): String = cipherPayload.removePrefix("enc:")
+        }
+        val prefs = NexaPreferencesDataStore(context, fakeCipher)
+        var turnNumber = 0
+        val transport = MockTransport { call ->
+            turnNumber += 1
+            when (turnNumber) {
+                1 -> sseResponse(
+                    call.url,
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"An API \"}}]}\n\n" +
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"connects apps.\"}}]}\n\n" +
+                        "data: [DONE]\n\n"
+                )
+                2 -> jsonResponse(call.url, 503, """{"error":{"message":"Upstream temporary overload"}}""")
+                else -> sseResponse(
+                    call.url,
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"Use HTTP GET \"}}]}\n\n" +
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"for weather.\"}}]}\n\n" +
+                        "data: [DONE]\n\n"
+                )
+            }
+        }
+        val httpClient = clientWithTransport(transport)
+        val connectionsRepo = ConnectionsRepository(
+            prefs = prefs,
+            providerRegistry = AiProviderRegistry(httpClient = httpClient),
+            capabilityInspector = AndroidCapabilityInspector(context)
+        )
+        val chatRepo = ChatRepository(db.conversationDao(), converters)
+        val settingsRepo = SettingsRepository(prefs)
+        val viewModel = ChatViewModel(
+            chatRepository = chatRepo,
+            connectionsRepository = connectionsRepo,
+            settingsRepository = settingsRepo,
+            toolRegistry = DefaultToolRegistry(),
+            systemPromptBuilder = SystemPromptBuilder(),
+            contextBuilder = ConversationContextBuilder(),
+            attachmentProcessor = AndroidAttachmentProcessor(context)
+        )
+
+        try {
+            prefs.saveProviderConfig(
+                type = AiProviderType.CUSTOM,
+                rawApiKey = null,
+                baseUrl = "http://localhost:11434/v1",
+                selectedModelId = "qwen2.5:14b",
+                manualModelId = "qwen2.5:14b",
+                setAsDefault = true
+            )
+            // Keep uiState active so stateIn collects DataStore and Room
+            val stateCollector = launch { viewModel.uiState.collect { } }
+            try {
+                withContext(Dispatchers.Default) {
+                    withTimeout(5_000) {
+                        while (viewModel.uiState.value.defaultProvider?.selectedModelId != "qwen2.5:14b") {
+                            kotlinx.coroutines.delay(20)
+                        }
+                    }
+                }
+
+                // Turn 1: send prompt and wait for streamed completion
+                viewModel.sendMessage("Explain what an API is.")
+                withContext(Dispatchers.Default) {
+                    withTimeout(5_000) {
+                        while (true) {
+                            val msgs = viewModel.uiState.value.messages
+                            if (msgs.size == 2 && msgs[1].status == MessageStatus.COMPLETE) break
+                            kotlinx.coroutines.delay(20)
+                        }
+                    }
+                }
+                val convId = viewModel.uiState.value.activeConversation!!.id
+                val afterTurn1 = chatRepo.getMessagesSnapshot(convId)
+                assertEquals(2, afterTurn1.size)
+                assertEquals("An API connects apps.", afterTurn1[1].content)
+
+                // Turn 2: fails with HTTP 503
+                viewModel.sendMessage("Give me a practical example.")
+                withContext(Dispatchers.Default) {
+                    withTimeout(5_000) {
+                        while (true) {
+                            val msgs = viewModel.uiState.value.messages
+                            if (msgs.size == 4 && msgs[3].status == MessageStatus.FAILED) break
+                            kotlinx.coroutines.delay(20)
+                        }
+                    }
+                }
+                val failedAssistant = viewModel.uiState.value.messages[3]
+                assertEquals(MessageStatus.FAILED, failedAssistant.status)
+
+                // Retry failed message without duplicating user prompt
+                viewModel.retryMessage(failedAssistant)
+                withContext(Dispatchers.Default) {
+                    withTimeout(5_000) {
+                        while (true) {
+                            val msgs = viewModel.uiState.value.messages
+                            if (msgs.size == 4 && msgs[3].status == MessageStatus.COMPLETE) break
+                            kotlinx.coroutines.delay(20)
+                        }
+                    }
+                }
+
+                val finalHistory = chatRepo.getMessagesSnapshot(convId)
+                assertEquals(4, finalHistory.size)
+                assertEquals(1, finalHistory.count { it.content == "Give me a practical example." })
+                assertEquals("Use HTTP GET for weather.", finalHistory[3].content)
+
+                // Verify multi-turn payload included system + turn1 user + turn1 assistant + turn2 user
+                val thirdReqBody = JSONObject(transport.recorded.last().body)
+                val sentMessages = thirdReqBody.getJSONArray("messages")
+                assertEquals(4, sentMessages.length())
+                assertEquals("system", sentMessages.getJSONObject(0).getString("role"))
+                assertEquals("user", sentMessages.getJSONObject(1).getString("role"))
+                assertEquals("Explain what an API is.", sentMessages.getJSONObject(1).getString("content"))
+                assertEquals("assistant", sentMessages.getJSONObject(2).getString("role"))
+                assertEquals("An API connects apps.", sentMessages.getJSONObject(2).getString("content"))
+                assertEquals("user", sentMessages.getJSONObject(3).getString("role"))
+                assertEquals("Give me a practical example.", sentMessages.getJSONObject(3).getString("content"))
+            } finally {
+                stateCollector.cancel()
+            }
+        } finally {
+            prefs.clearProviderKey(AiProviderType.CUSTOM)
+            db.close()
+            Dispatchers.resetMain()
+        }
     }
 
     private fun baseConfig(

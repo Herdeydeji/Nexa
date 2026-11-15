@@ -9,17 +9,22 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.Button
@@ -36,6 +41,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -72,7 +78,7 @@ fun ProviderConfigSheet(
     config: ProviderConfig,
     isRefreshingModels: Boolean,
     refreshError: String?,
-    onSave: (rawKey: String, baseUrl: String, selectedModelId: String?, manualModelId: String, setAsDefault: Boolean) -> String?,
+    onSave: (rawKey: String, baseUrl: String, selectedModelId: String?, manualModelId: String, setAsDefault: Boolean, allowManualToolsOverride: Boolean) -> String?,
     onRefreshModels: () -> Unit,
     onDisconnect: () -> Unit,
     onDismiss: () -> Unit
@@ -82,11 +88,29 @@ fun ProviderConfigSheet(
     var baseUrlInput by remember(config.providerType) { mutableStateOf(config.baseUrl) }
     var selectedModelId by remember(config.providerType) { mutableStateOf(config.selectedModelId) }
     var manualModelInput by remember(config.providerType) { mutableStateOf(config.manualModelId) }
+    var modelSearchQuery by remember(config.providerType) { mutableStateOf("") }
     var setAsDefault by remember(config.providerType) { mutableStateOf(config.isDefault) }
+    var allowManualToolsOverride by remember(config.providerType) { mutableStateOf(config.allowManualToolsOverride) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    val canDisconnect = config.hasApiKey || (config.providerType.requiresBaseUrl && config.baseUrl.isNotBlank())
+    val filteredModels = remember(config.availableModels, modelSearchQuery) {
+        val q = modelSearchQuery.trim()
+        if (q.isEmpty()) {
+            config.availableModels
+        } else {
+            config.availableModels.filter {
+                it.id.contains(q, ignoreCase = true) ||
+                    it.displayName.contains(q, ignoreCase = true)
+            }
+        }
+    }
+
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
+        sheetState = sheetState,
         containerColor = NexaSecondaryBackground,
         contentColor = NexaTextPrimary
     ) {
@@ -109,7 +133,7 @@ fun ProviderConfigSheet(
                 color = NexaTextSecondary
             )
 
-            if (config.hasApiKey) {
+            if (canDisconnect) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -122,14 +146,20 @@ fun ProviderConfigSheet(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = if (config.credentialInvalidated) "Stored Key Invalidated" else "Stored Key (Encrypted)",
+                            text = when {
+                                config.credentialInvalidated -> "Stored Key Invalidated"
+                                config.hasApiKey -> "Stored Key (Encrypted)"
+                                else -> "Configured Endpoint"
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = if (config.credentialInvalidated) NexaError else NexaTextSecondary
                         )
                         Text(
-                            text = config.maskedApiKey,
+                            text = if (config.hasApiKey) config.maskedApiKey else config.baseUrl,
                             style = MaterialTheme.typography.bodyMedium,
-                            color = if (config.credentialInvalidated) NexaError else NexaOrange
+                            color = if (config.credentialInvalidated) NexaError else NexaOrange,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                     TextButton(
@@ -262,61 +292,105 @@ fun ProviderConfigSheet(
                 }
             )
 
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                config.availableModels.take(25).forEach { model ->
-                    val isSelected = selectedModelId == model.id
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(if (isSelected) NexaOrangeMuted else NexaElevatedSurface)
-                            .border(
-                                1.dp,
-                                if (isSelected) NexaOrange else NexaBorder,
-                                RoundedCornerShape(10.dp)
-                            )
-                            .clickable { selectedModelId = model.id }
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Text(
-                                    text = model.displayName,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = if (isSelected) NexaOrange else NexaTextPrimary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f, fill = false)
-                                )
-                                StatusPill(
-                                    label = if (model.isManualEntry) "Manual" else if (model.isCatalogVerified) "Live" else "Preset",
-                                    textColor = if (model.isCatalogVerified) NexaInfo else NexaNeutral,
-                                    containerColor = if (model.isCatalogVerified) NexaInfoContainer else NexaNeutralContainer,
-                                    showDot = false
+            if (config.availableModels.isNotEmpty()) {
+                OutlinedTextField(
+                    value = modelSearchQuery,
+                    onValueChange = { modelSearchQuery = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("provider_model_search_input"),
+                    label = { Text("Search ${config.availableModels.size} models") },
+                    placeholder = { Text("Filter by model ID or name...") },
+                    singleLine = true,
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Outlined.Search,
+                            contentDescription = null,
+                            tint = NexaTextSecondary
+                        )
+                    },
+                    trailingIcon = {
+                        if (modelSearchQuery.isNotEmpty()) {
+                            IconButton(onClick = { modelSearchQuery = "" }) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Close,
+                                    contentDescription = "Clear model search",
+                                    tint = NexaTextSecondary
                                 )
                             }
-                            Text(
-                                text = buildString {
-                                    append("${model.contextWindowLabel} ctx")
-                                    if (model.supportsVision) append(" · Vision")
-                                    if (model.supportsTools) append(" · Tools")
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                                color = NexaTextSecondary
-                            )
                         }
-                        if (isSelected) {
-                            Icon(
-                                imageVector = Icons.Outlined.Check,
-                                contentDescription = "Selected model",
-                                tint = NexaOrange,
-                                modifier = Modifier.size(18.dp)
-                            )
+                    }
+                )
+            }
+
+            if (config.availableModels.isNotEmpty() && filteredModels.isEmpty()) {
+                Text(
+                    text = "No models match \"$modelSearchQuery\". You can enter a manual model ID above.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = NexaTextSecondary
+                )
+            } else if (filteredModels.isNotEmpty()) {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 280.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(filteredModels, key = { it.id }) { model ->
+                        val isSelected = selectedModelId == model.id
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (isSelected) NexaOrangeMuted else NexaElevatedSurface)
+                                .border(
+                                    1.dp,
+                                    if (isSelected) NexaOrange else NexaBorder,
+                                    RoundedCornerShape(10.dp)
+                                )
+                                .clickable { selectedModelId = model.id }
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = model.displayName,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = if (isSelected) NexaOrange else NexaTextPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    StatusPill(
+                                        label = if (model.isManualEntry) "Manual" else if (model.isCatalogVerified) "Live" else "Preset",
+                                        textColor = if (model.isCatalogVerified) NexaInfo else NexaNeutral,
+                                        containerColor = if (model.isCatalogVerified) NexaInfoContainer else NexaNeutralContainer,
+                                        showDot = false
+                                    )
+                                }
+                                Text(
+                                    text = buildString {
+                                        append("${model.contextWindowLabel} ctx")
+                                        if (model.supportsVision) append(" · Vision")
+                                        if (model.supportsTools) append(" · Tools")
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = NexaTextSecondary
+                                )
+                            }
+                            if (isSelected) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Check,
+                                    contentDescription = "Selected model",
+                                    tint = NexaOrange,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -344,6 +418,36 @@ fun ProviderConfigSheet(
                 )
             }
 
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { allowManualToolsOverride = !allowManualToolsOverride }
+                    .testTag("provider_allow_tools_switch"),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Checkbox(
+                    checked = allowManualToolsOverride,
+                    onCheckedChange = { allowManualToolsOverride = it },
+                    colors = CheckboxDefaults.colors(
+                        checkedColor = NexaOrange,
+                        checkmarkColor = NexaOnOrange
+                    )
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Allow tool calling for manual/unverified models",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = NexaTextPrimary
+                    )
+                    Text(
+                        text = "Catalog-verified models enable tools automatically. Manual or custom models default to conversational-only unless enabled here.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = NexaTextSecondary
+                    )
+                }
+            }
+
             errorMessage?.let { err ->
                 NoticeBanner(
                     icon = Icons.Outlined.ErrorOutline,
@@ -369,7 +473,8 @@ fun ProviderConfigSheet(
                             baseUrlInput,
                             selectedModelId,
                             manualModelInput,
-                            setAsDefault
+                            setAsDefault,
+                            allowManualToolsOverride
                         )
                         if (err == null) {
                             onDismiss()

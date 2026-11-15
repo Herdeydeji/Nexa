@@ -46,6 +46,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -131,8 +132,27 @@ fun ChatScreen(
         }
     }
 
-    LaunchedEffect(state.messages.size, state.messages.lastOrNull()?.content?.length) {
+    val isNearBottom by remember {
+        derivedStateOf {
+            val layoutInfo = listState.layoutInfo
+            val total = layoutInfo.totalItemsCount
+            if (total == 0) {
+                true
+            } else {
+                val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                lastVisible >= total - 2
+            }
+        }
+    }
+
+    LaunchedEffect(state.messages.size) {
         if (state.messages.isNotEmpty()) {
+            listState.scrollToItem(state.messages.lastIndex)
+        }
+    }
+
+    LaunchedEffect(state.messages.lastOrNull()?.content?.length) {
+        if (state.messages.isNotEmpty() && isNearBottom) {
             listState.scrollToItem(state.messages.lastIndex)
         }
     }
@@ -193,6 +213,65 @@ fun ChatScreen(
                     }
                 }
             }
+        }
+
+        if (state.isResponding) {
+            Surface(
+                color = NexaSecondaryBackground,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("chat_live_execution_bar")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text(
+                            text = state.runStatus.label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (state.isPaused) NexaInfo else NexaOrange
+                        )
+                        if (state.statusDetail.isNotBlank()) {
+                            Text(
+                                text = state.statusDetail,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = NexaTextSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                if (state.isPaused) viewModel.resumeExecution() else viewModel.pauseExecution()
+                            },
+                            modifier = Modifier.testTag("chat_pause_resume_button")
+                        ) {
+                            Text(if (state.isPaused) "Resume" else "Pause")
+                        }
+                        OutlinedButton(
+                            onClick = viewModel::stopResponse,
+                            modifier = Modifier.testTag("chat_cancel_run_button")
+                        ) {
+                            Text("Cancel", color = NexaError)
+                        }
+                    }
+                }
+            }
+        }
+
+        state.pendingApproval?.let { approvalRequest ->
+            com.example.ui.components.ApprovalGateCard(
+                request = approvalRequest,
+                onApprove = { viewModel.approveToolCall(approvalRequest.callId) },
+                onReject = { viewModel.rejectToolCall(approvalRequest.callId) },
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+            )
         }
 
         if (state.attachmentNotices.isNotEmpty()) {
@@ -273,6 +352,7 @@ fun ChatScreen(
     if (showToolsSheet) {
         ToolsCatalogSheet(
             tools = state.availableTools,
+            executableTools = state.executableTools,
             onDismiss = { showToolsSheet = false }
         )
     }
@@ -381,6 +461,7 @@ private fun AgentStatusPill(status: AgentStatus) {
         AgentStatus.PREVIEW -> NexaOrange to NexaOrangeMuted
         AgentStatus.THINKING, AgentStatus.EXECUTING -> NexaInfo to NexaInfoContainer
         AgentStatus.AWAITING_CONFIRMATION -> NexaWarning to NexaWarningContainer
+        AgentStatus.PAUSED -> NexaInfo to NexaInfoContainer
         AgentStatus.OFFLINE -> NexaNeutral to NexaNeutralContainer
     }
     StatusPill(label = status.label, textColor = fg, containerColor = bg)
@@ -548,6 +629,14 @@ private fun ChatMessageRow(
                     text = "${message.tokenUsage.totalTokens} tokens",
                     style = MaterialTheme.typography.labelSmall,
                     color = NexaTextTertiary
+                )
+            }
+
+            message.verificationSummary?.takeIf { it.requestedToolCalls > 0 }?.let { verification ->
+                Text(
+                    text = verification.summaryNote,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (verification.isVerified) NexaSuccess else NexaWarning
                 )
             }
 

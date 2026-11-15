@@ -28,8 +28,11 @@ data class AppSettings(
     // Agent behaviour
     val responseVerbosity: ResponseVerbosity = ResponseVerbosity.BALANCED,
     val autoExpandExecutionPanel: Boolean = true,
-    val maxStepsPerTask: Int = 12,
-    val customSystemPrompt: String = "",
+    val maxStepsPerTask: Int = 8,
+    val maxToolCallsPerTask: Int = 12,
+    val toolTimeoutSeconds: Int = 10,
+    val taskTimeoutSeconds: Int = 120,
+    val maxToolResultChars: Int = 8_000,
     val customSystemPrompt: String = "",
     // Task permissions
     val allowBackgroundTaskQueue: Boolean = false,
@@ -47,4 +50,13 @@ data class AppSettings(
     val maskCredentialsInExports: Boolean = true,
     val redactSensitiveStepsInLogs: Boolean = true,
     val biometricLockOnApproval: Boolean = false
-)
+) {
+    fun toExecutionLimits(contextTokens: Int?): AgentExecutionLimits = AgentExecutionLimits(
+        maxIterations = maxStepsPerTask.coerceIn(2, 24),
+        maxToolCalls = maxToolCallsPerTask.coerceIn(1, 32),
+        toolTimeoutMillis = (toolTimeoutSeconds.coerceIn(2, 60)) * 1000L,
+        taskTimeoutMillis = (taskTimeoutSeconds.coerceIn(15, 300)) * 1000L,
+        maxToolResultChars = maxToolResultChars.coerceIn(500, 32_000),
+        maxContextTokens = contextTokens
+    )
+}

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -22,16 +23,23 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Cancel
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.HourglassEmpty
 import androidx.compose.material.icons.outlined.PauseCircleOutline
 import androidx.compose.material.icons.outlined.PlayCircleOutline
+import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.VerifiedUser
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -49,20 +57,29 @@ import androidx.compose.ui.unit.dp
 import com.example.domain.model.ExecutionPlan
 import com.example.domain.model.ExecutionStep
 import com.example.domain.model.ExecutionStepState
+import com.example.domain.model.StepKind
 import com.example.domain.model.TaskSummary
+import com.example.domain.model.ToolApprovalRequest
+import com.example.domain.model.ToolRiskCategory
 import com.example.ui.theme.NexaBackground
 import com.example.ui.theme.NexaBorder
 import com.example.ui.theme.NexaElevatedSurface
 import com.example.ui.theme.NexaError
+import com.example.ui.theme.NexaErrorContainer
+import com.example.ui.theme.NexaInfo
+import com.example.ui.theme.NexaInfoContainer
 import com.example.ui.theme.NexaNeutral
+import com.example.ui.theme.NexaOnOrange
 import com.example.ui.theme.NexaOrange
 import com.example.ui.theme.NexaOrangeMuted
 import com.example.ui.theme.NexaSecondaryBackground
 import com.example.ui.theme.NexaSuccess
+import com.example.ui.theme.NexaSuccessContainer
 import com.example.ui.theme.NexaTextPrimary
 import com.example.ui.theme.NexaTextSecondary
 import com.example.ui.theme.NexaTextTertiary
 import com.example.ui.theme.NexaWarning
+import com.example.ui.theme.NexaWarningContainer
 
 @Composable
 fun ExpandableAgentExecutionPanel(
@@ -73,6 +90,16 @@ fun ExpandableAgentExecutionPanel(
 ) {
     var expanded by rememberSaveable(plan.goal) { mutableStateOf(initiallyExpanded) }
     val completedCount = plan.steps.count { it.state == ExecutionStepState.COMPLETED }
+    val subtitleText = if (plan.isPreview) {
+        "$completedCount of ${plan.steps.size} steps · Not executed on device"
+    } else {
+        val verificationNote = plan.verificationSummary?.summaryNote
+        if (!verificationNote.isNullOrBlank()) {
+            "$completedCount of ${plan.steps.size} steps · $verificationNote"
+        } else {
+            "$completedCount of ${plan.steps.size} steps · Executed on device"
+        }
+    }
 
     Column(
         modifier = modifier
@@ -123,10 +150,18 @@ fun ExpandableAgentExecutionPanel(
                             containerColor = NexaOrangeMuted,
                             showDot = false
                         )
+                    } else if (!plan.isPreview && plan.verificationSummary != null) {
+                        val verified = plan.verificationSummary.isVerified
+                        StatusPill(
+                            label = if (verified) "VERIFIED" else "UNVERIFIED",
+                            textColor = if (verified) NexaSuccess else NexaWarning,
+                            containerColor = if (verified) NexaSuccessContainer else NexaWarningContainer,
+                            showDot = false
+                        )
                     }
                 }
                 Text(
-                    text = "$completedCount of ${plan.steps.size} steps · Not executed on device",
+                    text = subtitleText,
                     style = MaterialTheme.typography.bodySmall,
                     color = NexaTextSecondary
                 )
@@ -226,12 +261,17 @@ fun AgentActivityTimeline(
                         style = MaterialTheme.typography.bodySmall,
                         color = NexaTextSecondary
                     )
-                    if (!step.toolName.isNullOrBlank() || !step.timestampLabel.isNullOrBlank()) {
+                    if (!step.toolName.isNullOrBlank() || !step.timestampLabel.isNullOrBlank() || step.kind != StepKind.EXECUTED) {
                         Spacer(modifier = Modifier.height(4.dp))
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            Text(
+                                text = stepKindLabel(step.kind),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = color.copy(alpha = 0.9f)
+                            )
                             if (!step.toolName.isNullOrBlank()) {
                                 Text(
                                     text = step.toolName,
@@ -249,6 +289,118 @@ fun AgentActivityTimeline(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun ApprovalGateCard(
+    request: ToolApprovalRequest,
+    onApprove: () -> Unit,
+    onReject: () -> Unit,
+    modifier: Modifier = Modifier,
+    approveTestTag: String = "approve_tool_button",
+    rejectTestTag: String = "reject_tool_button"
+) {
+    val (riskFg, riskBg) = when (request.riskCategory) {
+        ToolRiskCategory.READ_ONLY -> NexaSuccess to NexaSuccessContainer
+        ToolRiskCategory.REVERSIBLE -> NexaInfo to NexaInfoContainer
+        ToolRiskCategory.SENSITIVE,
+        ToolRiskCategory.EXTERNAL_SIDE_EFFECT -> NexaWarning to NexaWarningContainer
+        ToolRiskCategory.DESTRUCTIVE -> NexaError to NexaErrorContainer
+    }
+    NexaSurfaceCard(
+        modifier = modifier.testTag("approval_gate_card"),
+        containerColor = NexaElevatedSurface,
+        borderColor = NexaWarning.copy(alpha = 0.5f)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Shield,
+                    contentDescription = null,
+                    tint = NexaWarning,
+                    modifier = Modifier.size(18.dp)
+                )
+                Text(
+                    text = "Action Approval Required",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = NexaTextPrimary
+                )
+            }
+            StatusPill(
+                label = request.riskCategory.label,
+                textColor = riskFg,
+                containerColor = riskBg,
+                showDot = false
+            )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = request.intentSummary,
+            style = MaterialTheme.typography.bodyMedium,
+            color = NexaTextPrimary
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = "Tool: ${request.toolName} (${request.toolId}) · ${if (request.isReversible) "Reversible" else "Non-reversible"}",
+            style = MaterialTheme.typography.labelSmall,
+            color = NexaTextSecondary
+        )
+        if (request.argumentsPreview.isNotBlank()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Parameters: ${request.argumentsPreview}",
+                style = MaterialTheme.typography.bodySmall,
+                color = NexaTextSecondary
+            )
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = request.approvalEffect,
+            style = MaterialTheme.typography.bodySmall,
+            color = NexaTextTertiary
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            OutlinedButton(
+                onClick = onReject,
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 48.dp)
+                    .testTag(rejectTestTag)
+            ) {
+                Icon(Icons.Outlined.Close, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Reject")
+            }
+            Button(
+                onClick = onApprove,
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 48.dp)
+                    .testTag(approveTestTag),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = NexaOrange,
+                    contentColor = NexaOnOrange
+                )
+            ) {
+                Icon(Icons.Outlined.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Approve")
             }
         }
     }
@@ -321,4 +473,14 @@ private fun stepStateVisuals(state: ExecutionStepState): Pair<ImageVector, Color
         ExecutionStepState.AWAITING_CONFIRMATION -> Icons.Outlined.PauseCircleOutline to NexaWarning
         ExecutionStepState.CANCELLED -> Icons.Outlined.Cancel to NexaNeutral
     }
+}
+
+private fun stepKindLabel(kind: StepKind): String = when (kind) {
+    StepKind.INTENT -> "Intent"
+    StepKind.EXECUTED -> "Executed"
+    StepKind.RESULT -> "Result"
+    StepKind.APPROVAL -> "Approval"
+    StepKind.VERIFICATION -> "Verified"
+    StepKind.ERROR -> "Error"
+    StepKind.CANCELLED -> "Cancelled"
 }

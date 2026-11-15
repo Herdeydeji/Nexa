@@ -3,12 +3,14 @@ package com.example.domain.provider
 import com.example.domain.model.AiModelInfo
 import com.example.domain.model.AiProviderType
 import com.example.domain.model.MessageRole
+import com.example.domain.model.MessageStatus
 import com.example.domain.model.ProviderConfig
 import com.example.domain.model.TokenUsage
+import com.example.domain.model.ToolCall
 import com.example.domain.security.ApiKeyMasker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.channelFlow
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -67,19 +69,19 @@ class AnthropicProviderAdapter(
         config: ProviderConfig,
         rawApiKey: String,
         request: ProviderRequest
-    ): Flow<ProviderStreamEvent> = flow {
+    ): Flow<ProviderStreamEvent> = channelFlow {
         if (rawApiKey.isBlank()) {
-            emit(ProviderStreamEvent.Failed(ProviderError.MissingApiKey("Configure an Anthropic API key in Connections.")))
-            return@flow
+            send(ProviderStreamEvent.Failed(ProviderError.MissingApiKey("Configure an Anthropic API key in Connections.")))
+            return@channelFlow
         }
         val baseUrl = normalizedBaseUrl(config)
         if (baseUrl == null) {
-            emit(ProviderStreamEvent.Failed(ProviderError.InvalidEndpoint("Anthropic base URL must use HTTPS.")))
-            return@flow
+            send(ProviderStreamEvent.Failed(ProviderError.InvalidEndpoint("Anthropic base URL must use HTTPS.")))
+            return@channelFlow
         }
         if (request.modelId.isBlank()) {
-            emit(ProviderStreamEvent.Failed(ProviderError.UnsupportedModel("Select an Anthropic model first.")))
-            return@flow
+            send(ProviderStreamEvent.Failed(ProviderError.UnsupportedModel("Select an Anthropic model first.")))
+            return@channelFlow
         }
 
         val supportsVision = request.modelInfo?.supportsVision ?: false
@@ -88,6 +90,16 @@ class AnthropicProviderAdapter(
         var inputTokens: Int? = null
         var outputTokens: Int? = null
         var emittedError: ProviderError? = null
+
+        class ActiveToolBlock(
+            val index: Int,
+            val id: String,
+            val name: String,
+            val initialInputJson: String,
+            val partialInputBuilder: StringBuilder = StringBuilder()
+        )
+        val activeToolBlocks = linkedMapOf<Int, ActiveToolBlock>()
+        val completedToolCalls = mutableListOf<ToolCall>()
 
         val result = try {
             httpClient.streamSsePost(
@@ -111,13 +123,65 @@ class AnthropicProviderAdapter(
                             }
                             true
                         }
-                        "content_block_delta" -> {
-                            val delta = json.optJSONObject("delta")
-                            if (delta?.optString("type") == "text_delta") {
-                                val text = delta.optString("text", "")
-                                if (text.isNotEmpty()) {
-                                    emit(ProviderStreamEvent.Delta(text))
+                        "content_block_start" -> {
+                            val blockIndex = json.optInt("index", activeToolBlocks.size)
+                            val block = json.optJSONObject("content_block")
+                            if (block?.optString("type") == "tool_use") {
+                                val id = block.optString("id").ifBlank { "toolu_$blockIndex" }
+                                val name = block.optString("name").trim()
+                                val initialInput = block.optJSONObject("input")?.toString().orEmpty()
+                                if (name.isNotEmpty()) {
+                                    activeToolBlocks[blockIndex] = ActiveToolBlock(
+                                        index = blockIndex,
+                                        id = id,
+                                        name = name,
+                                        initialInputJson = if (initialInput == "{}") "" else initialInput
+                                    )
+                                    send(ProviderStreamEvent.ToolCallDelta(index = blockIndex, id = id, name = name))
                                 }
+                            }
+                            true
+                        }
+                        "content_block_delta" -> {
+                            val blockIndex = json.optInt("index", 0)
+                            val delta = json.optJSONObject("delta")
+                            when (delta?.optString("type")) {
+                                "text_delta" -> {
+                                    val text = delta.optString("text", "")
+                                    if (text.isNotEmpty()) {
+                                        send(ProviderStreamEvent.Delta(text))
+                                    }
+                                }
+                                "input_json_delta" -> {
+                                    val partial = delta.optString("partial_json", "")
+                                    val slot = activeToolBlocks[blockIndex]
+                                    if (slot != null && partial.isNotEmpty()) {
+                                        slot.partialInputBuilder.append(partial)
+                                        send(
+                                            ProviderStreamEvent.ToolCallDelta(
+                                                index = blockIndex,
+                                                id = slot.id,
+                                                name = slot.name,
+                                                argumentsDelta = partial
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                            true
+                        }
+                        "content_block_stop" -> {
+                            val blockIndex = json.optInt("index", -1)
+                            val slot = activeToolBlocks.remove(blockIndex)
+                            if (slot != null) {
+                                val rawArgs = slot.partialInputBuilder.toString().ifBlank { slot.initialInputJson }.ifBlank { "{}" }
+                                completedToolCalls.add(
+                                    ToolCall(
+                                        id = slot.id,
+                                        toolName = slot.name,
+                                        argumentsJson = rawArgs
+                                    )
+                                )
                             }
                             true
                         }
@@ -130,7 +194,7 @@ class AnthropicProviderAdapter(
                                     completionTokens = outputTokens,
                                     totalTokens = if (inputTokens != null && outputTokens != null) inputTokens!! + outputTokens!! else null
                                 )
-                                emit(ProviderStreamEvent.Usage(usage))
+                                send(ProviderStreamEvent.Usage(usage))
                             }
                             true
                         }
@@ -171,9 +235,21 @@ class AnthropicProviderAdapter(
                     if (contentArr != null) {
                         for (i in 0 until contentArr.length()) {
                             val block = contentArr.optJSONObject(i) ?: continue
-                            if (block.optString("type") == "text") {
-                                val text = block.optString("text", "")
-                                if (text.isNotEmpty()) emit(ProviderStreamEvent.Delta(text))
+                            when (block.optString("type")) {
+                                "text" -> {
+                                    val text = block.optString("text", "")
+                                    if (text.isNotEmpty()) send(ProviderStreamEvent.Delta(text))
+                                }
+                                "tool_use" -> {
+                                    val id = block.optString("id").ifBlank { "toolu_$i" }
+                                    val name = block.optString("name").trim()
+                                    val inputJson = block.optJSONObject("input")?.toString() ?: "{}"
+                                    if (name.isNotEmpty()) {
+                                        completedToolCalls.add(
+                                            ToolCall(id = id, toolName = name, argumentsJson = inputJson)
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -181,6 +257,12 @@ class AnthropicProviderAdapter(
             )
         } catch (ce: CancellationException) {
             throw ce
+        }
+
+        // Flush any unclosed tool blocks in case a stream ended abruptly before content_block_stop
+        activeToolBlocks.values.sortedBy { it.index }.forEach { slot ->
+            val rawArgs = slot.partialInputBuilder.toString().ifBlank { slot.initialInputJson }.ifBlank { "{}" }
+            completedToolCalls.add(ToolCall(id = slot.id, toolName = slot.name, argumentsJson = rawArgs))
         }
 
         val finalUsage = if (inputTokens != null || outputTokens != null) {
@@ -197,13 +279,16 @@ class AnthropicProviderAdapter(
             (it as? ProviderException)?.error ?: NexaHttpClient.mapThrowableToError(it, rawApiKey)
         }
         if (terminalErr != null) {
-            emit(ProviderStreamEvent.Failed(terminalErr))
+            send(ProviderStreamEvent.Failed(terminalErr))
         } else {
-            emit(ProviderStreamEvent.Completed(finalUsage))
+            if (completedToolCalls.isNotEmpty()) {
+                send(ProviderStreamEvent.ToolCallsCompleted(completedToolCalls.toList(), finalUsage))
+            }
+            send(ProviderStreamEvent.Completed(finalUsage))
         }
     }
 
-    private fun buildAnthropicRequestBody(request: ProviderRequest, supportsVision: Boolean): String {
+    internal fun buildAnthropicRequestBody(request: ProviderRequest, supportsVision: Boolean): String {
         val root = JSONObject()
         root.put("model", request.modelId)
         root.put("stream", true)
@@ -215,42 +300,102 @@ class AnthropicProviderAdapter(
 
         val messagesArr = JSONArray()
         val lastUserIndex = request.messages.indexOfLast { it.role == MessageRole.USER }
-        request.messages.forEachIndexed { index, msg ->
-            if (msg.role == MessageRole.SYSTEM) return@forEachIndexed
-            val role = if (msg.role == MessageRole.ASSISTANT) "assistant" else "user"
-
-            if (index == lastUserIndex && request.attachments.isNotEmpty()) {
-                val combinedText = OpenAiCompatibleJson.appendTextAttachments(msg.content, request.attachments)
-                val images = if (supportsVision) {
-                    request.attachments.filter { it.isSupported && !it.imageBase64.isNullOrBlank() }
-                } else {
-                    emptyList()
+        var i = 0
+        while (i < request.messages.size) {
+            val msg = request.messages[i]
+            when (msg.role) {
+                MessageRole.SYSTEM -> {
+                    i++
+                    continue
                 }
-                if (images.isNotEmpty()) {
-                    val blocks = JSONArray()
-                    images.forEach { img ->
-                        blocks.put(
+                MessageRole.TOOL -> {
+                    val toolResultBlocks = JSONArray()
+                    while (i < request.messages.size && request.messages[i].role == MessageRole.TOOL) {
+                        val toolMsg = request.messages[i]
+                        toolResultBlocks.put(
                             JSONObject()
-                                .put("type", "image")
-                                .put(
-                                    "source",
-                                    JSONObject()
-                                        .put("type", "base64")
-                                        .put("media_type", img.mimeType.ifBlank { "image/jpeg" })
-                                        .put("data", img.imageBase64)
-                                )
+                                .put("type", "tool_result")
+                                .put("tool_use_id", toolMsg.toolCallId ?: "")
+                                .put("content", toolMsg.content)
+                                .put("is_error", toolMsg.status == MessageStatus.FAILED)
                         )
+                        i++
                     }
-                    blocks.put(JSONObject().put("type", "text").put("text", combinedText))
-                    messagesArr.put(JSONObject().put("role", role).put("content", blocks))
-                } else {
-                    messagesArr.put(JSONObject().put("role", role).put("content", combinedText))
+                    messagesArr.put(JSONObject().put("role", "user").put("content", toolResultBlocks))
+                    continue
                 }
-            } else {
-                messagesArr.put(JSONObject().put("role", role).put("content", msg.content))
+                MessageRole.ASSISTANT -> {
+                    if (msg.toolCalls.isNotEmpty()) {
+                        val blocks = JSONArray()
+                        if (msg.content.isNotBlank()) {
+                            blocks.put(JSONObject().put("type", "text").put("text", msg.content))
+                        }
+                        msg.toolCalls.forEach { tc ->
+                            val inputObj = runCatching { JSONObject(tc.argumentsJson) }.getOrElse { JSONObject() }
+                            blocks.put(
+                                JSONObject()
+                                    .put("type", "tool_use")
+                                    .put("id", tc.id)
+                                    .put("name", tc.toolName)
+                                    .put("input", inputObj)
+                            )
+                        }
+                        messagesArr.put(JSONObject().put("role", "assistant").put("content", blocks))
+                    } else {
+                        messagesArr.put(JSONObject().put("role", "assistant").put("content", msg.content))
+                    }
+                }
+                MessageRole.USER -> {
+                    if (i == lastUserIndex && request.attachments.isNotEmpty()) {
+                        val combinedText = OpenAiCompatibleJson.appendTextAttachments(msg.content, request.attachments)
+                        val images = if (supportsVision) {
+                            request.attachments.filter { it.isSupported && !it.imageBase64.isNullOrBlank() }
+                        } else {
+                            emptyList()
+                        }
+                        if (images.isNotEmpty()) {
+                            val blocks = JSONArray()
+                            images.forEach { img ->
+                                blocks.put(
+                                    JSONObject()
+                                        .put("type", "image")
+                                        .put(
+                                            "source",
+                                            JSONObject()
+                                                .put("type", "base64")
+                                                .put("media_type", img.mimeType.ifBlank { "image/jpeg" })
+                                                .put("data", img.imageBase64)
+                                        )
+                                )
+                            }
+                            blocks.put(JSONObject().put("type", "text").put("text", combinedText))
+                            messagesArr.put(JSONObject().put("role", "user").put("content", blocks))
+                        } else {
+                            messagesArr.put(JSONObject().put("role", "user").put("content", combinedText))
+                        }
+                    } else {
+                        messagesArr.put(JSONObject().put("role", "user").put("content", msg.content))
+                    }
+                }
             }
+            i++
         }
         root.put("messages", messagesArr)
+
+        if (request.allowTools && request.tools.isNotEmpty()) {
+            val toolsArr = JSONArray()
+            request.tools.forEach { tool ->
+                toolsArr.put(
+                    JSONObject()
+                        .put("name", tool.name)
+                        .put("description", tool.description)
+                        .put("input_schema", OpenAiCompatibleJson.buildJsonSchemaObject(tool))
+                )
+            }
+            root.put("tools", toolsArr)
+            root.put("tool_choice", JSONObject().put("type", "auto"))
+        }
+
         return root.toString()
     }
 

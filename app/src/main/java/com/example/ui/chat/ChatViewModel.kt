@@ -6,26 +6,45 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.repository.ChatRepository
 import com.example.data.repository.ConnectionsRepository
 import com.example.data.repository.SettingsRepository
+import com.example.data.repository.TaskRepository
+import com.example.domain.agent.ActiveAgentRunState
+import com.example.domain.agent.AgentRunController
 import com.example.domain.agent.AgentTool
+import com.example.domain.agent.AutonomousAgentOrchestrator
+import com.example.domain.agent.DefaultAutonomousAgentOrchestrator
+import com.example.domain.agent.DefaultSafetyPolicyManager
+import com.example.domain.agent.ToolExecutionRuntime
 import com.example.domain.agent.ToolRegistry
 import com.example.domain.chat.AttachmentProcessor
 import com.example.domain.chat.ConversationContextBuilder
 import com.example.domain.chat.SystemPromptBuilder
+import com.example.domain.model.AgentEvent
+import com.example.domain.model.AgentExecutionContext
+import com.example.domain.model.AgentRunStatus
 import com.example.domain.model.AgentStatus
+import com.example.domain.model.AgentTaskStatus
 import com.example.domain.model.AppSettings
+import com.example.domain.model.ApprovalDecision
+import com.example.domain.model.AttachmentPayload
 import com.example.domain.model.ChatMessage
 import com.example.domain.model.ComposerAttachment
 import com.example.domain.model.Conversation
+import com.example.domain.model.ExecutionPlan
+import com.example.domain.model.ExecutionStep
+import com.example.domain.model.ExecutionStepState
 import com.example.domain.model.MessageRole
 import com.example.domain.model.MessageStatus
 import com.example.domain.model.ProviderConfig
-import com.example.domain.model.TokenUsage
-import com.example.domain.provider.ProviderRequest
-import com.example.domain.provider.ProviderStreamEvent
+import com.example.domain.model.StepKind
+import com.example.domain.model.TaskSummary
+import com.example.domain.model.ToolApprovalRequest
+import com.example.domain.model.ToolDefinition
+import com.example.domain.model.ToolExecutionStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -36,6 +55,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.util.UUID
 
 data class ChatUiState(
@@ -48,9 +68,16 @@ data class ChatUiState(
     val defaultProvider: ProviderConfig? = null,
     val allProviders: List<ProviderConfig> = emptyList(),
     val agentStatus: AgentStatus = AgentStatus.OFFLINE,
+    val runStatus: AgentRunStatus = AgentRunStatus.IDLE,
+    val statusDetail: String = "",
+    val liveSteps: List<ExecutionStep> = emptyList(),
+    val pendingApproval: ToolApprovalRequest? = null,
+    val isPaused: Boolean = false,
+    val activeTaskId: String? = null,
     val isResponding: Boolean = false,
     val settings: AppSettings = AppSettings(),
-    val availableTools: List<AgentTool> = emptyList()
+    val availableTools: List<AgentTool> = emptyList(),
+    val executableTools: List<ToolDefinition> = emptyList()
 )
 
 private data class StreamingOverlay(
@@ -67,18 +94,29 @@ class ChatViewModel(
     private val toolRegistry: ToolRegistry,
     private val systemPromptBuilder: SystemPromptBuilder,
     private val contextBuilder: ConversationContextBuilder,
-    private val attachmentProcessor: AttachmentProcessor
+    private val attachmentProcessor: AttachmentProcessor,
+    private val taskRepository: TaskRepository? = null,
+    autonomousOrchestrator: AutonomousAgentOrchestrator? = null,
+    private val agentRunController: AgentRunController = AgentRunController()
 ) : ViewModel() {
+
+    private val orchestrator: AutonomousAgentOrchestrator = autonomousOrchestrator
+        ?: DefaultAutonomousAgentOrchestrator(
+            connectionsRepository = connectionsRepository,
+            toolRegistry = toolRegistry,
+            safetyPolicyManager = DefaultSafetyPolicyManager(),
+            executionRuntime = ToolExecutionRuntime(toolRegistry),
+            contextBuilder = contextBuilder
+        )
 
     private val selectedConversationId = MutableStateFlow<String?>(null)
     private val draftText = MutableStateFlow("")
     private val pendingAttachments = MutableStateFlow<List<ComposerAttachment>>(emptyList())
     private val attachmentNotices = MutableStateFlow<List<String>>(emptyList())
     private val streamingOverlay = MutableStateFlow(StreamingOverlay())
+    private val lastTurnAttachments = mutableMapOf<String, List<ComposerAttachment>>()
 
     private var responseJob: Job? = null
-    @Volatile
-    private var cancelledByUser: Boolean = false
 
     private val activeMessagesFlow = selectedConversationId.flatMapLatest { id ->
         if (id == null) flowOf(emptyList()) else chatRepository.observeMessages(id)
@@ -90,6 +128,13 @@ class ChatViewModel(
         val messages: List<ChatMessage>,
         val draft: String,
         val attachments: List<ComposerAttachment>
+    )
+
+    private data class UiExtras(
+        val overlay: StreamingOverlay,
+        val notices: List<String>,
+        val settings: AppSettings,
+        val runState: ActiveAgentRunState
     )
 
     private val chatMetaFlow = combine(
@@ -105,9 +150,10 @@ class ChatViewModel(
     private val uiExtrasFlow = combine(
         streamingOverlay,
         attachmentNotices,
-        settingsRepository.settings
-    ) { overlay, notices, settings ->
-        Triple(overlay, notices, settings)
+        settingsRepository.settings,
+        agentRunController.state
+    ) { overlay, notices, settings, runState ->
+        UiExtras(overlay, notices, settings, runState)
     }
 
     val uiState: StateFlow<ChatUiState> = combine(
@@ -116,7 +162,7 @@ class ChatViewModel(
         connectionsRepository.defaultProvider,
         uiExtrasFlow
     ) { meta, providers, defaultProvider, extras ->
-        val (overlay, notices, settings) = extras
+        val (overlay, notices, settings, runState) = extras
         val liveConversations = meta.conversations.filterNot { it.isSamplePreview }
         val resolvedActive = liveConversations.firstOrNull { it.id == meta.selectedId }
             ?: liveConversations.firstOrNull()
@@ -124,16 +170,38 @@ class ChatViewModel(
             selectedConversationId.value = resolvedActive.id
         }
 
-        val mergedMessages = meta.messages.map { msg ->
-            if (overlay.isResponding && overlay.messageId == msg.id) {
-                msg.copy(
-                    content = overlay.text,
-                    status = MessageStatus.STREAMING
-                )
-            } else {
-                msg
+        val visibleMessages = meta.messages
+            .filter { msg ->
+                when (msg.role) {
+                    MessageRole.TOOL -> false
+                    MessageRole.ASSISTANT -> msg.content.isNotBlank() ||
+                        msg.status == MessageStatus.STREAMING ||
+                        msg.status == MessageStatus.FAILED ||
+                        msg.status == MessageStatus.STOPPED
+                    else -> true
+                }
             }
-        }
+            .map { msg ->
+                if (overlay.isResponding && overlay.messageId == msg.id) {
+                    val livePlan = if (runState.liveSteps.isNotEmpty() && runState.activeConversationId == msg.conversationId) {
+                        ExecutionPlan(
+                            goal = msg.content.ifBlank { "Active agent task" },
+                            isPreview = false,
+                            steps = runState.liveSteps,
+                            verificationSummary = runState.verificationSummary
+                        )
+                    } else {
+                        msg.executionPlan
+                    }
+                    msg.copy(
+                        content = overlay.text,
+                        status = MessageStatus.STREAMING,
+                        executionPlan = livePlan
+                    )
+                } else {
+                    msg
+                }
+            }
 
         val hasUsableProvider = defaultProvider != null &&
             !defaultProvider.credentialInvalidated &&
@@ -141,7 +209,12 @@ class ChatViewModel(
             !defaultProvider.selectedModelId.isNullOrBlank()
 
         val status = when {
-            overlay.isResponding -> AgentStatus.THINKING
+            runState.isPaused -> AgentStatus.PAUSED
+            runState.pendingApproval != null || runState.runStatus == AgentRunStatus.AWAITING_APPROVAL -> AgentStatus.AWAITING_CONFIRMATION
+            runState.runStatus == AgentRunStatus.SELECTING_TOOL ||
+                runState.runStatus == AgentRunStatus.EXECUTING_TOOL ||
+                runState.runStatus == AgentRunStatus.OBSERVING_RESULT -> AgentStatus.EXECUTING
+            overlay.isResponding || runState.isRunning -> AgentStatus.THINKING
             !hasUsableProvider -> AgentStatus.OFFLINE
             else -> AgentStatus.IDLE
         }
@@ -149,21 +222,31 @@ class ChatViewModel(
         ChatUiState(
             conversations = liveConversations,
             activeConversation = resolvedActive,
-            messages = mergedMessages,
+            messages = visibleMessages,
             draftText = meta.draft,
             attachments = meta.attachments,
             attachmentNotices = notices,
             defaultProvider = defaultProvider,
             allProviders = providers,
             agentStatus = status,
+            runStatus = runState.runStatus,
+            statusDetail = runState.statusDetail,
+            liveSteps = runState.liveSteps,
+            pendingApproval = runState.pendingApproval,
+            isPaused = runState.isPaused,
+            activeTaskId = runState.activeTaskId,
             isResponding = overlay.isResponding,
             settings = settings,
-            availableTools = toolRegistry.getAllTools()
+            availableTools = toolRegistry.getAllTools(),
+            executableTools = toolRegistry.getExecutableTools().map { it.definition }
         )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
-        initialValue = ChatUiState(availableTools = toolRegistry.getAllTools())
+        initialValue = ChatUiState(
+            availableTools = toolRegistry.getAllTools(),
+            executableTools = toolRegistry.getExecutableTools().map { it.definition }
+        )
     )
 
     fun onDraftChanged(value: String) {
@@ -208,6 +291,7 @@ class ChatViewModel(
     }
 
     fun deleteConversation(id: String) {
+        lastTurnAttachments.remove(id)
         viewModelScope.launch {
             chatRepository.deleteConversation(id)
             if (selectedConversationId.value == id) {
@@ -220,6 +304,22 @@ class ChatViewModel(
         viewModelScope.launch {
             connectionsRepository.setDefaultProvider(provider.providerType, modelId)
         }
+    }
+
+    fun pauseExecution() {
+        agentRunController.pause()
+    }
+
+    fun resumeExecution() {
+        agentRunController.resume()
+    }
+
+    fun approveToolCall(callId: String) {
+        agentRunController.submitApproval(callId, ApprovalDecision.APPROVE)
+    }
+
+    fun rejectToolCall(callId: String) {
+        agentRunController.submitApproval(callId, ApprovalDecision.REJECT)
     }
 
     fun sendMessage(overridePrompt: String? = null) {
@@ -243,6 +343,12 @@ class ChatViewModel(
                 ?: chatRepository.createConversation("New conversation").also {
                     selectedConversationId.value = it
                 }
+
+            if (currentAttachments.isNotEmpty()) {
+                lastTurnAttachments[targetConvId] = currentAttachments
+            } else {
+                lastTurnAttachments.remove(targetConvId)
+            }
 
             chatRepository.appendMessage(
                 conversationId = targetConvId,
@@ -313,8 +419,9 @@ class ChatViewModel(
                 attachmentNotices.value = notices
             }
 
-            streamAssistantReply(
+            runAgentTurn(
                 conversationId = targetConvId,
+                userPrompt = promptToSend,
                 provider = provider,
                 modelId = modelId,
                 processedAttachments = processedAttachments.filter { it.isSupported }
@@ -326,6 +433,8 @@ class ChatViewModel(
         if (streamingOverlay.value.isResponding) return
         if (failedOrStoppedMessage.role != MessageRole.ASSISTANT) return
 
+        attachmentNotices.value = emptyList()
+
         responseJob = viewModelScope.launch {
             val targetConvId = failedOrStoppedMessage.conversationId
             chatRepository.deleteMessage(failedOrStoppedMessage.id)
@@ -335,6 +444,7 @@ class ChatViewModel(
                     !it.credentialInvalidated &&
                         (it.hasApiKey || (it.providerType.requiresBaseUrl && it.baseUrl.isNotBlank()))
                 }
+            val modelInfo = provider?.selectedModelInfo
             val modelId = provider?.selectedModelId?.takeIf { it.isNotBlank() }
 
             if (provider == null || modelId == null ||
@@ -351,52 +461,61 @@ class ChatViewModel(
                 return@launch
             }
 
-            streamAssistantReply(
+            val cachedAttachments = lastTurnAttachments[targetConvId].orEmpty()
+            val processedAttachments = if (cachedAttachments.isNotEmpty()) {
+                attachmentProcessor.process(
+                    attachments = cachedAttachments,
+                    modelSupportsVision = modelInfo?.supportsVision == true,
+                    modelDisplayName = modelInfo?.displayName ?: modelId
+                ).also { processed ->
+                    val notices = processed.mapNotNull { it.unsupportedReason }
+                    if (notices.isNotEmpty()) {
+                        attachmentNotices.value = notices
+                    }
+                }.filter { it.isSupported }
+            } else {
+                emptyList()
+            }
+
+            val latestPrompt = chatRepository.getMessagesSnapshot(targetConvId)
+                .lastOrNull { it.role == MessageRole.USER }?.content ?: "Retry prompt"
+
+            runAgentTurn(
                 conversationId = targetConvId,
+                userPrompt = latestPrompt,
                 provider = provider,
                 modelId = modelId,
-                processedAttachments = emptyList()
+                processedAttachments = processedAttachments
             )
         }
     }
 
     fun stopResponse() {
+        agentRunController.cancelActiveRun()
         if (responseJob?.isActive == true) {
-            cancelledByUser = true
             responseJob?.cancel()
         }
     }
 
-    private suspend fun streamAssistantReply(
+    private suspend fun runAgentTurn(
         conversationId: String,
+        userPrompt: String,
         provider: ProviderConfig,
         modelId: String,
-        processedAttachments: List<com.example.domain.model.AttachmentPayload>
+        processedAttachments: List<AttachmentPayload>
     ) {
-        cancelledByUser = false
         val settings = settingsRepository.settings.first()
-        val systemPrompt = systemPromptBuilder.build(settings)
-        val historySnapshot = chatRepository.getMessagesSnapshot(conversationId)
-        val contextResult = contextBuilder.buildContext(
-            history = historySnapshot,
-            systemPrompt = systemPrompt,
-            modelContextLengthTokens = provider.selectedModelInfo?.contextLengthTokens
+        val capabilities = connectionsRepository.capabilities.first()
+        val allImplementedTools = toolRegistry.getAvailableToolDefinitions(capabilities)
+        val availableTools = if (provider.effectiveSupportsTools) allImplementedTools else emptyList()
+        val systemPrompt = systemPromptBuilder.build(
+            settings = settings,
+            availableTools = allImplementedTools,
+            toolsEnabledForModel = provider.effectiveSupportsTools
         )
+        val historySnapshot = chatRepository.getMessagesSnapshot(conversationId)
 
-        if (contextResult.messages.isEmpty()) {
-            chatRepository.appendMessage(
-                conversationId = conversationId,
-                role = MessageRole.ASSISTANT,
-                content = "",
-                status = MessageStatus.FAILED,
-                errorMessage = "Nothing to send in this conversation.",
-                providerLabel = provider.providerType.displayName,
-                modelLabel = modelId
-            )
-            return
-        }
-
-        val assistantId = chatRepository.appendMessage(
+        var currentAssistantId = chatRepository.appendMessage(
             conversationId = conversationId,
             role = MessageRole.ASSISTANT,
             content = "",
@@ -405,133 +524,326 @@ class ChatViewModel(
             modelLabel = modelId
         )
 
-        val streamBuffer = StringBuilder()
-        var latestUsage: TokenUsage? = null
-        var failureMessage: String? = null
-        var completedCleanly = false
+        val taskId = "task_${UUID.randomUUID()}"
+        val context = AgentExecutionContext(
+            taskId = taskId,
+            conversationId = conversationId,
+            userPrompt = userPrompt,
+            provider = provider,
+            settings = settings,
+            limits = settings.toExecutionLimits(provider.selectedModelInfo?.contextLengthTokens),
+            availableTools = availableTools,
+            systemPrompt = systemPrompt
+        )
+
+        val job = currentCoroutineContext()[Job]
+        val control = agentRunController.beginRun(taskId, conversationId, job)
+        var liveTaskCreated = false
+        var latestPlan: ExecutionPlan? = null
+        var latestText = ""
         var lastPersistedAt = System.currentTimeMillis()
+        val usedToolNames = mutableSetOf<String>()
+        val taskCreatedAt = System.currentTimeMillis()
 
         streamingOverlay.value = StreamingOverlay(
-            messageId = assistantId,
+            messageId = currentAssistantId,
             text = "",
             isResponding = true
         )
 
         try {
-            val request = ProviderRequest(
-                modelId = modelId,
-                messages = contextResult.messages,
-                systemPrompt = systemPrompt,
-                attachments = processedAttachments,
-                modelInfo = provider.selectedModelInfo
-            )
-
-            connectionsRepository.streamChat(provider, request).collect { event ->
+            orchestrator.runTurn(context, historySnapshot, processedAttachments, control).collect { event ->
+                agentRunController.applyEvent(event)
                 when (event) {
-                    is ProviderStreamEvent.Delta -> {
-                        streamBuffer.append(event.text)
-                        val textNow = streamBuffer.toString()
+                    is AgentEvent.TextDelta -> {
+                        latestText = event.accumulatedText
                         streamingOverlay.value = StreamingOverlay(
-                            messageId = assistantId,
-                            text = textNow,
+                            messageId = currentAssistantId,
+                            text = latestText,
                             isResponding = true
                         )
                         val now = System.currentTimeMillis()
-                        if (now - lastPersistedAt > 500L) {
+                        if (latestText.isNotEmpty() && now - lastPersistedAt > 500L) {
                             lastPersistedAt = now
                             chatRepository.finalizeMessage(
-                                messageId = assistantId,
+                                messageId = currentAssistantId,
                                 conversationId = conversationId,
-                                content = textNow,
-                                status = MessageStatus.STREAMING,
-                                tokenUsage = latestUsage
+                                content = latestText,
+                                status = MessageStatus.STREAMING
                             )
                         }
                     }
-                    is ProviderStreamEvent.Usage -> {
-                        latestUsage = event.usage
+
+                    is AgentEvent.ToolSelected -> {
+                        liveTaskCreated = true
+                        event.toolCalls.forEach { usedToolNames.add(it.toolName) }
+                        taskRepository?.upsertLiveTask(
+                            taskId = taskId,
+                            title = userPrompt.take(64),
+                            prompt = userPrompt,
+                            status = AgentTaskStatus.RUNNING,
+                            providerLabel = provider.providerType.displayName,
+                            modelLabel = modelId,
+                            requiredCapabilities = usedToolNames.toList(),
+                            steps = latestPlan?.steps.orEmpty(),
+                            createdAtMillis = taskCreatedAt
+                        )
                     }
-                    is ProviderStreamEvent.Completed -> {
-                        if (event.usage != null) latestUsage = event.usage
-                        completedCleanly = true
+
+                    is AgentEvent.ApprovalRequired -> {
+                        if (liveTaskCreated) {
+                            taskRepository?.upsertLiveTask(
+                                taskId = taskId,
+                                title = userPrompt.take(64),
+                                prompt = userPrompt,
+                                status = AgentTaskStatus.AWAITING_APPROVAL,
+                                providerLabel = provider.providerType.displayName,
+                                modelLabel = modelId,
+                                requiredCapabilities = usedToolNames.toList(),
+                                steps = latestPlan?.steps.orEmpty(),
+                                createdAtMillis = taskCreatedAt
+                            )
+                        }
                     }
-                    is ProviderStreamEvent.Failed -> {
-                        failureMessage = event.error.userMessage
+
+                    is AgentEvent.Paused -> {
+                        if (liveTaskCreated) {
+                            taskRepository?.updateLiveTaskOutcome(taskId, AgentTaskStatus.PAUSED)
+                        }
                     }
+
+                    is AgentEvent.Resumed -> {
+                        if (liveTaskCreated) {
+                            taskRepository?.updateLiveTaskOutcome(taskId, AgentTaskStatus.RUNNING)
+                        }
+                    }
+
+                    is AgentEvent.PlanUpdated -> {
+                        latestPlan = event.plan
+                        if (liveTaskCreated) {
+                            val runStateNow = agentRunController.state.value
+                            val taskStatus = when {
+                                runStateNow.isPaused -> AgentTaskStatus.PAUSED
+                                runStateNow.pendingApproval != null -> AgentTaskStatus.AWAITING_APPROVAL
+                                else -> AgentTaskStatus.RUNNING
+                            }
+                            taskRepository?.upsertLiveTask(
+                                taskId = taskId,
+                                title = userPrompt.take(64),
+                                prompt = userPrompt,
+                                status = taskStatus,
+                                providerLabel = provider.providerType.displayName,
+                                modelLabel = modelId,
+                                requiredCapabilities = usedToolNames.toList(),
+                                steps = event.plan.steps,
+                                verificationSummary = event.plan.verificationSummary,
+                                createdAtMillis = taskCreatedAt
+                            )
+                        }
+                    }
+
+                    is AgentEvent.IntermediateMessagesProduced -> {
+                        // Replace temporary streaming bubble so chronological order in Room stays:
+                        // USER -> ASSISTANT(toolCalls) -> TOOL(results) -> ASSISTANT(final)
+                        chatRepository.deleteMessage(currentAssistantId)
+                        chatRepository.appendMessage(
+                            conversationId = conversationId,
+                            role = MessageRole.ASSISTANT,
+                            content = event.assistantText,
+                            status = MessageStatus.COMPLETE,
+                            providerLabel = provider.providerType.displayName,
+                            modelLabel = modelId,
+                            toolCalls = event.assistantToolCalls
+                        )
+                        event.toolResults.forEach { res ->
+                            val toolJson = res.outputJson
+                                ?: JSONObject().put("error", res.errorMessage ?: res.displaySummary).toString()
+                            chatRepository.appendMessage(
+                                conversationId = conversationId,
+                                role = MessageRole.TOOL,
+                                content = toolJson,
+                                status = if (res.status == ToolExecutionStatus.SUCCEEDED) MessageStatus.COMPLETE else MessageStatus.FAILED,
+                                toolCallId = res.callId,
+                                toolName = res.toolName
+                            )
+                        }
+                        latestText = ""
+                        currentAssistantId = chatRepository.appendMessage(
+                            conversationId = conversationId,
+                            role = MessageRole.ASSISTANT,
+                            content = "",
+                            status = MessageStatus.STREAMING,
+                            providerLabel = provider.providerType.displayName,
+                            modelLabel = modelId
+                        )
+                        streamingOverlay.value = StreamingOverlay(
+                            messageId = currentAssistantId,
+                            text = "",
+                            isResponding = true
+                        )
+                    }
+
+                    is AgentEvent.Completed -> {
+                        if (liveTaskCreated) {
+                            taskRepository?.upsertLiveTask(
+                                taskId = taskId,
+                                title = userPrompt.take(64),
+                                prompt = userPrompt,
+                                status = AgentTaskStatus.COMPLETED,
+                                providerLabel = provider.providerType.displayName,
+                                modelLabel = modelId,
+                                requiredCapabilities = usedToolNames.toList(),
+                                steps = event.plan?.steps ?: latestPlan?.steps.orEmpty(),
+                                summaryMessage = event.finalText.take(280),
+                                verificationSummary = event.verification,
+                                createdAtMillis = taskCreatedAt
+                            )
+                        }
+                        chatRepository.finalizeMessage(
+                            messageId = currentAssistantId,
+                            conversationId = conversationId,
+                            content = event.finalText,
+                            status = MessageStatus.COMPLETE,
+                            errorMessage = null,
+                            providerLabel = provider.providerType.displayName,
+                            modelLabel = modelId,
+                            tokenUsage = event.usage,
+                            executionPlan = event.plan,
+                            taskSummary = event.taskSummary,
+                            verificationSummary = event.verification
+                        )
+                    }
+
+                    is AgentEvent.Failed -> {
+                        if (liveTaskCreated) {
+                            taskRepository?.upsertLiveTask(
+                                taskId = taskId,
+                                title = userPrompt.take(64),
+                                prompt = userPrompt,
+                                status = AgentTaskStatus.FAILED,
+                                providerLabel = provider.providerType.displayName,
+                                modelLabel = modelId,
+                                requiredCapabilities = usedToolNames.toList(),
+                                steps = event.plan?.steps ?: latestPlan?.steps.orEmpty(),
+                                failureReason = event.errorMessage,
+                                verificationSummary = event.verification,
+                                createdAtMillis = taskCreatedAt
+                            )
+                        }
+                        chatRepository.finalizeMessage(
+                            messageId = currentAssistantId,
+                            conversationId = conversationId,
+                            content = event.partialText,
+                            status = MessageStatus.FAILED,
+                            errorMessage = event.errorMessage,
+                            providerLabel = provider.providerType.displayName,
+                            modelLabel = modelId,
+                            tokenUsage = event.usage,
+                            executionPlan = event.plan,
+                            taskSummary = event.taskSummary,
+                            verificationSummary = event.verification
+                        )
+                    }
+
+                    is AgentEvent.Cancelled -> {
+                        if (liveTaskCreated) {
+                            taskRepository?.upsertLiveTask(
+                                taskId = taskId,
+                                title = userPrompt.take(64),
+                                prompt = userPrompt,
+                                status = AgentTaskStatus.CANCELLED,
+                                providerLabel = provider.providerType.displayName,
+                                modelLabel = modelId,
+                                requiredCapabilities = usedToolNames.toList(),
+                                steps = event.plan?.steps ?: latestPlan?.steps.orEmpty(),
+                                failureReason = "Cancelled by user",
+                                verificationSummary = event.verification,
+                                createdAtMillis = taskCreatedAt
+                            )
+                        }
+                        chatRepository.finalizeMessage(
+                            messageId = currentAssistantId,
+                            conversationId = conversationId,
+                            content = event.partialText,
+                            status = MessageStatus.STOPPED,
+                            errorMessage = if (event.partialText.isBlank()) "Generation stopped before output arrived." else null,
+                            providerLabel = provider.providerType.displayName,
+                            modelLabel = modelId,
+                            tokenUsage = event.usage,
+                            executionPlan = event.plan,
+                            taskSummary = event.taskSummary,
+                            verificationSummary = event.verification
+                        )
+                    }
+
+                    is AgentEvent.StatusChanged,
+                    is AgentEvent.ToolStarted,
+                    is AgentEvent.ToolCompleted -> Unit
                 }
             }
         } catch (ce: CancellationException) {
             withContext(NonCancellable) {
-                val partial = streamBuffer.toString()
+                val cancelledSteps = latestPlan?.steps?.map { step ->
+                    if (step.state in setOf(
+                            ExecutionStepState.PENDING,
+                            ExecutionStepState.RUNNING,
+                            ExecutionStepState.AWAITING_CONFIRMATION
+                        )
+                    ) {
+                        step.copy(
+                            state = ExecutionStepState.CANCELLED,
+                            detail = "Cancelled by user",
+                            kind = StepKind.CANCELLED
+                        )
+                    } else {
+                        step
+                    }
+                }.orEmpty()
+                val cancelledPlan = latestPlan?.copy(steps = cancelledSteps)
+                val cancelledSummary = if (liveTaskCreated) {
+                    TaskSummary(
+                        taskId = taskId,
+                        title = userPrompt.take(64),
+                        status = AgentTaskStatus.CANCELLED,
+                        completedSteps = cancelledSteps.count { it.state == ExecutionStepState.COMPLETED },
+                        totalSteps = cancelledSteps.size,
+                        targetApp = "Nexa Tools",
+                        isSampleData = false
+                    )
+                } else {
+                    null
+                }
+                if (liveTaskCreated) {
+                    taskRepository?.upsertLiveTask(
+                        taskId = taskId,
+                        title = userPrompt.take(64),
+                        prompt = userPrompt,
+                        status = AgentTaskStatus.CANCELLED,
+                        providerLabel = provider.providerType.displayName,
+                        modelLabel = modelId,
+                        requiredCapabilities = usedToolNames.toList(),
+                        steps = cancelledSteps,
+                        failureReason = "Cancelled by user.",
+                        createdAtMillis = taskCreatedAt
+                    )
+                }
                 chatRepository.finalizeMessage(
-                    messageId = assistantId,
+                    messageId = currentAssistantId,
                     conversationId = conversationId,
-                    content = partial,
+                    content = latestText,
                     status = MessageStatus.STOPPED,
-                    errorMessage = if (partial.isBlank()) "Generation stopped before output arrived." else null,
+                    errorMessage = if (latestText.isBlank()) "Generation stopped before output arrived." else null,
                     providerLabel = provider.providerType.displayName,
                     modelLabel = modelId,
-                    tokenUsage = latestUsage
+                    executionPlan = cancelledPlan,
+                    taskSummary = cancelledSummary
                 )
             }
-            streamingOverlay.value = StreamingOverlay()
             throw ce
         } finally {
-            if (!cancelledByUser) {
+            withContext(NonCancellable) {
                 streamingOverlay.value = StreamingOverlay()
-            }
-        }
-
-        val finalText = streamBuffer.toString()
-        val err = failureMessage
-        when {
-            cancelledByUser -> {
-                chatRepository.finalizeMessage(
-                    messageId = assistantId,
-                    conversationId = conversationId,
-                    content = finalText,
-                    status = MessageStatus.STOPPED,
-                    errorMessage = if (finalText.isBlank()) "Generation stopped before output arrived." else null,
-                    providerLabel = provider.providerType.displayName,
-                    modelLabel = modelId,
-                    tokenUsage = latestUsage
-                )
-            }
-            err != null -> {
-                chatRepository.finalizeMessage(
-                    messageId = assistantId,
-                    conversationId = conversationId,
-                    content = finalText,
-                    status = MessageStatus.FAILED,
-                    errorMessage = err,
-                    providerLabel = provider.providerType.displayName,
-                    modelLabel = modelId,
-                    tokenUsage = latestUsage
-                )
-            }
-            completedCleanly && finalText.isBlank() -> {
-                chatRepository.finalizeMessage(
-                    messageId = assistantId,
-                    conversationId = conversationId,
-                    content = "",
-                    status = MessageStatus.FAILED,
-                    errorMessage = "Provider returned an empty response. Please retry or check model compatibility.",
-                    providerLabel = provider.providerType.displayName,
-                    modelLabel = modelId,
-                    tokenUsage = latestUsage
-                )
-            }
-            else -> {
-                chatRepository.finalizeMessage(
-                    messageId = assistantId,
-                    conversationId = conversationId,
-                    content = finalText,
-                    status = MessageStatus.COMPLETE,
-                    errorMessage = null,
-                    providerLabel = provider.providerType.displayName,
-                    modelLabel = modelId,
-                    tokenUsage = latestUsage
-                )
+                agentRunController.finishRun()
             }
         }
     }
@@ -543,7 +855,10 @@ class ChatViewModel(
         private val toolRegistry: ToolRegistry,
         private val systemPromptBuilder: SystemPromptBuilder,
         private val contextBuilder: ConversationContextBuilder,
-        private val attachmentProcessor: AttachmentProcessor
+        private val attachmentProcessor: AttachmentProcessor,
+        private val taskRepository: TaskRepository? = null,
+        private val autonomousOrchestrator: AutonomousAgentOrchestrator? = null,
+        private val agentRunController: AgentRunController = AgentRunController()
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -554,7 +869,10 @@ class ChatViewModel(
                 toolRegistry = toolRegistry,
                 systemPromptBuilder = systemPromptBuilder,
                 contextBuilder = contextBuilder,
-                attachmentProcessor = attachmentProcessor
+                attachmentProcessor = attachmentProcessor,
+                taskRepository = taskRepository,
+                autonomousOrchestrator = autonomousOrchestrator,
+                agentRunController = agentRunController
             ) as T
         }
     }

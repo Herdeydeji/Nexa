@@ -5,10 +5,11 @@ import com.example.domain.model.AiProviderType
 import com.example.domain.model.MessageRole
 import com.example.domain.model.ProviderConfig
 import com.example.domain.model.TokenUsage
+import com.example.domain.model.ToolCall
 import com.example.domain.security.ApiKeyMasker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.channelFlow
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -67,19 +68,19 @@ class GeminiProviderAdapter(
         config: ProviderConfig,
         rawApiKey: String,
         request: ProviderRequest
-    ): Flow<ProviderStreamEvent> = flow {
+    ): Flow<ProviderStreamEvent> = channelFlow {
         if (rawApiKey.isBlank()) {
-            emit(ProviderStreamEvent.Failed(ProviderError.MissingApiKey("Configure a Google Gemini API key in Connections.")))
-            return@flow
+            send(ProviderStreamEvent.Failed(ProviderError.MissingApiKey("Configure a Google Gemini API key in Connections.")))
+            return@channelFlow
         }
         val baseUrl = normalizedBaseUrl(config)
         if (baseUrl == null) {
-            emit(ProviderStreamEvent.Failed(ProviderError.InvalidEndpoint("Gemini base URL must use HTTPS.")))
-            return@flow
+            send(ProviderStreamEvent.Failed(ProviderError.InvalidEndpoint("Gemini base URL must use HTTPS.")))
+            return@channelFlow
         }
         if (request.modelId.isBlank()) {
-            emit(ProviderStreamEvent.Failed(ProviderError.UnsupportedModel("Select a Gemini model first.")))
-            return@flow
+            send(ProviderStreamEvent.Failed(ProviderError.UnsupportedModel("Select a Gemini model first.")))
+            return@channelFlow
         }
 
         val cleanModelId = request.modelId.removePrefix("models/").trim()
@@ -88,6 +89,31 @@ class GeminiProviderAdapter(
 
         var latestUsage: TokenUsage? = null
         var emittedError: ProviderError? = null
+        val collectedToolCalls = mutableListOf<ToolCall>()
+        var callSequence = 0
+
+        suspend fun handleChunk(chunk: GeminiParseResult.Chunk) {
+            if (chunk.usage != null) {
+                latestUsage = chunk.usage
+                send(ProviderStreamEvent.Usage(chunk.usage))
+            }
+            if (chunk.text.isNotEmpty()) {
+                send(ProviderStreamEvent.Delta(chunk.text))
+            }
+            chunk.functionCalls.forEach { fc ->
+                val idx = callSequence++
+                val call = fc.copy(id = "gemini_call_${idx}_${fc.toolName}")
+                collectedToolCalls.add(call)
+                send(
+                    ProviderStreamEvent.ToolCallDelta(
+                        index = idx,
+                        id = call.id,
+                        name = call.toolName,
+                        argumentsDelta = call.argumentsJson
+                    )
+                )
+            }
+        }
 
         val result = try {
             httpClient.streamSsePost(
@@ -97,16 +123,9 @@ class GeminiProviderAdapter(
                 secretToSanitize = rawApiKey,
                 modelId = cleanModelId,
                 onFrame = { frame ->
-                    val parsed = parseGeminiResponseObject(frame.data, rawApiKey, cleanModelId)
-                    when (parsed) {
+                    when (val parsed = parseGeminiResponseObject(frame.data, rawApiKey, cleanModelId)) {
                         is GeminiParseResult.Chunk -> {
-                            if (parsed.usage != null) {
-                                latestUsage = parsed.usage
-                                emit(ProviderStreamEvent.Usage(parsed.usage))
-                            }
-                            if (parsed.text.isNotEmpty()) {
-                                emit(ProviderStreamEvent.Delta(parsed.text))
-                            }
+                            handleChunk(parsed)
                             true
                         }
                         is GeminiParseResult.Error -> {
@@ -123,25 +142,13 @@ class GeminiProviderAdapter(
                         for (i in 0 until arr.length()) {
                             val item = arr.optJSONObject(i) ?: continue
                             when (val parsed = parseGeminiResponseObject(item.toString(), rawApiKey, cleanModelId)) {
-                                is GeminiParseResult.Chunk -> {
-                                    if (parsed.usage != null) {
-                                        latestUsage = parsed.usage
-                                        emit(ProviderStreamEvent.Usage(parsed.usage))
-                                    }
-                                    if (parsed.text.isNotEmpty()) emit(ProviderStreamEvent.Delta(parsed.text))
-                                }
+                                is GeminiParseResult.Chunk -> handleChunk(parsed)
                                 is GeminiParseResult.Error -> throw ProviderException(parsed.error)
                             }
                         }
                     } else {
                         when (val parsed = parseGeminiResponseObject(bodyText, rawApiKey, cleanModelId)) {
-                            is GeminiParseResult.Chunk -> {
-                                if (parsed.usage != null) {
-                                    latestUsage = parsed.usage
-                                    emit(ProviderStreamEvent.Usage(parsed.usage))
-                                }
-                                if (parsed.text.isNotEmpty()) emit(ProviderStreamEvent.Delta(parsed.text))
-                            }
+                            is GeminiParseResult.Chunk -> handleChunk(parsed)
                             is GeminiParseResult.Error -> throw ProviderException(parsed.error)
                         }
                     }
@@ -155,13 +162,16 @@ class GeminiProviderAdapter(
             (it as? ProviderException)?.error ?: NexaHttpClient.mapThrowableToError(it, rawApiKey)
         }
         if (terminalErr != null) {
-            emit(ProviderStreamEvent.Failed(terminalErr))
+            send(ProviderStreamEvent.Failed(terminalErr))
         } else {
-            emit(ProviderStreamEvent.Completed(latestUsage))
+            if (collectedToolCalls.isNotEmpty()) {
+                send(ProviderStreamEvent.ToolCallsCompleted(collectedToolCalls.toList(), latestUsage))
+            }
+            send(ProviderStreamEvent.Completed(latestUsage))
         }
     }
 
-    private fun buildGeminiRequestBody(request: ProviderRequest, supportsVision: Boolean): String {
+    internal fun buildGeminiRequestBody(request: ProviderRequest, supportsVision: Boolean): String {
         val root = JSONObject()
 
         if (request.systemPrompt.isNotBlank()) {
@@ -176,39 +186,116 @@ class GeminiProviderAdapter(
 
         val contents = JSONArray()
         val lastUserIndex = request.messages.indexOfLast { it.role == MessageRole.USER }
-        request.messages.forEachIndexed { index, msg ->
-            if (msg.role == MessageRole.SYSTEM) return@forEachIndexed
-            val role = if (msg.role == MessageRole.ASSISTANT) "model" else "user"
-            val parts = JSONArray()
-
-            if (index == lastUserIndex && request.attachments.isNotEmpty()) {
-                val combinedText = OpenAiCompatibleJson.appendTextAttachments(msg.content, request.attachments)
-                parts.put(JSONObject().put("text", combinedText))
-                if (supportsVision) {
-                    request.attachments
-                        .filter { it.isSupported && !it.imageBase64.isNullOrBlank() }
-                        .forEach { img ->
-                            parts.put(
-                                JSONObject().put(
-                                    "inline_data",
-                                    JSONObject()
-                                        .put("mime_type", img.mimeType.ifBlank { "image/jpeg" })
-                                        .put("data", img.imageBase64)
-                                )
-                            )
-                        }
+        var i = 0
+        while (i < request.messages.size) {
+            val msg = request.messages[i]
+            when (msg.role) {
+                MessageRole.SYSTEM -> {
+                    i++
+                    continue
                 }
-            } else {
-                parts.put(JSONObject().put("text", msg.content))
+                MessageRole.TOOL -> {
+                    val toolParts = JSONArray()
+                    while (i < request.messages.size && request.messages[i].role == MessageRole.TOOL) {
+                        val toolMsg = request.messages[i]
+                        val responseObj = runCatching { JSONObject(toolMsg.content) }.getOrElse {
+                            JSONObject().put("output", toolMsg.content)
+                        }
+                        toolParts.put(
+                            JSONObject().put(
+                                "functionResponse",
+                                JSONObject()
+                                    .put("name", toolMsg.toolName ?: "tool")
+                                    .put("response", responseObj)
+                            )
+                        )
+                        i++
+                    }
+                    contents.put(
+                        JSONObject()
+                            .put("role", "user")
+                            .put("parts", toolParts)
+                    )
+                    continue
+                }
+                MessageRole.ASSISTANT -> {
+                    val parts = JSONArray()
+                    if (msg.content.isNotBlank()) {
+                        parts.put(JSONObject().put("text", msg.content))
+                    }
+                    msg.toolCalls.forEach { tc ->
+                        val argsObj = runCatching { JSONObject(tc.argumentsJson) }.getOrElse { JSONObject() }
+                        parts.put(
+                            JSONObject().put(
+                                "functionCall",
+                                JSONObject()
+                                    .put("name", tc.toolName)
+                                    .put("args", argsObj)
+                            )
+                        )
+                    }
+                    contents.put(
+                        JSONObject()
+                            .put("role", "model")
+                            .put("parts", parts)
+                    )
+                }
+                MessageRole.USER -> {
+                    val parts = JSONArray()
+                    if (i == lastUserIndex && request.attachments.isNotEmpty()) {
+                        val combinedText = OpenAiCompatibleJson.appendTextAttachments(msg.content, request.attachments)
+                        parts.put(JSONObject().put("text", combinedText))
+                        if (supportsVision) {
+                            request.attachments
+                                .filter { it.isSupported && !it.imageBase64.isNullOrBlank() }
+                                .forEach { img ->
+                                    parts.put(
+                                        JSONObject().put(
+                                            "inline_data",
+                                            JSONObject()
+                                                .put("mime_type", img.mimeType.ifBlank { "image/jpeg" })
+                                                .put("data", img.imageBase64)
+                                        )
+                                    )
+                                }
+                        }
+                    } else {
+                        parts.put(JSONObject().put("text", msg.content))
+                    }
+                    contents.put(
+                        JSONObject()
+                            .put("role", "user")
+                            .put("parts", parts)
+                    )
+                }
             }
-
-            contents.put(
-                JSONObject()
-                    .put("role", role)
-                    .put("parts", parts)
-            )
+            i++
         }
         root.put("contents", contents)
+
+        if (request.allowTools && request.tools.isNotEmpty()) {
+            val declarations = JSONArray()
+            request.tools.forEach { tool ->
+                val fn = JSONObject()
+                    .put("name", tool.name)
+                    .put("description", tool.description)
+                if (tool.parameters.isNotEmpty()) {
+                    fn.put("parameters", OpenAiCompatibleJson.buildJsonSchemaObject(tool, uppercaseTypes = true))
+                }
+                declarations.put(fn)
+            }
+            root.put(
+                "tools",
+                JSONArray().put(JSONObject().put("functionDeclarations", declarations))
+            )
+            root.put(
+                "toolConfig",
+                JSONObject().put(
+                    "functionCallingConfig",
+                    JSONObject().put("mode", "AUTO")
+                )
+            )
+        }
 
         val genConfig = JSONObject().put("temperature", request.temperature)
         request.maxTokens?.let { genConfig.put("maxOutputTokens", it) }
@@ -255,7 +342,11 @@ class GeminiProviderAdapter(
     }
 
     private sealed interface GeminiParseResult {
-        data class Chunk(val text: String, val usage: TokenUsage? = null) : GeminiParseResult
+        data class Chunk(
+            val text: String,
+            val functionCalls: List<ToolCall> = emptyList(),
+            val usage: TokenUsage? = null
+        ) : GeminiParseResult
         data class Error(val error: ProviderError) : GeminiParseResult
     }
 
@@ -292,6 +383,7 @@ class GeminiProviderAdapter(
         }
 
         val textBuilder = StringBuilder()
+        val functionCalls = mutableListOf<ToolCall>()
         val candidates = root.optJSONArray("candidates")
         val parts = candidates?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
         if (parts != null) {
@@ -300,9 +392,27 @@ class GeminiProviderAdapter(
                 if (part.has("text") && !part.isNull("text")) {
                     textBuilder.append(part.optString("text", ""))
                 }
+                val fc = part.optJSONObject("functionCall")
+                if (fc != null) {
+                    val fnName = fc.optString("name").trim()
+                    if (fnName.isNotEmpty()) {
+                        val argsJson = fc.optJSONObject("args")?.toString() ?: "{}"
+                        functionCalls.add(
+                            ToolCall(
+                                id = "gemini_call_$fnName",
+                                toolName = fnName,
+                                argumentsJson = argsJson
+                            )
+                        )
+                    }
+                }
             }
         }
-        return GeminiParseResult.Chunk(text = textBuilder.toString(), usage = usage)
+        return GeminiParseResult.Chunk(
+            text = textBuilder.toString(),
+            functionCalls = functionCalls,
+            usage = usage
+        )
     }
 
     private fun normalizedBaseUrl(config: ProviderConfig): String? {

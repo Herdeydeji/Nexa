@@ -131,8 +131,10 @@ fun TaskStatusPill(status: AgentTaskStatus, modifier: Modifier = Modifier) {
     val (fg, bg) = when (status) {
         AgentTaskStatus.RUNNING -> NexaOrange to NexaOrangeMuted
         AgentTaskStatus.AWAITING_APPROVAL -> NexaWarning to NexaWarningContainer
+        AgentTaskStatus.PAUSED -> NexaInfo to NexaInfoContainer
         AgentTaskStatus.COMPLETED -> NexaSuccess to NexaSuccessContainer
         AgentTaskStatus.FAILED -> NexaError to NexaErrorContainer
+        AgentTaskStatus.CANCELLED -> NexaNeutral to NexaNeutralContainer
     }
     StatusPill(label = status.label, textColor = fg, containerColor = bg, modifier = modifier)
 }

@@ -3,7 +3,8 @@ package com.example.domain.model
 enum class MessageRole {
     USER,
     ASSISTANT,
-    SYSTEM
+    SYSTEM,
+    TOOL
 }
 
 enum class MessageStatus {
@@ -54,7 +55,11 @@ data class ChatMessage(
     val executionPlan: ExecutionPlan? = null,
     val taskSummary: TaskSummary? = null,
     val attachments: List<String> = emptyList(),
-    val isPreviewMessage: Boolean = false
+    val isPreviewMessage: Boolean = false,
+    val toolCalls: List<ToolCall> = emptyList(),
+    val toolCallId: String? = null,
+    val toolName: String? = null,
+    val verificationSummary: TaskVerificationSummary? = null
 )
 
 data class Conversation(

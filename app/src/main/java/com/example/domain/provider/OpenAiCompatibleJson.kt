@@ -4,6 +4,8 @@ import com.example.domain.model.AiModelInfo
 import com.example.domain.model.AttachmentPayload
 import com.example.domain.model.MessageRole
 import com.example.domain.model.TokenUsage
+import com.example.domain.model.ToolCall
+import com.example.domain.model.ToolDefinition
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -38,45 +40,127 @@ internal object OpenAiCompatibleJson {
 
         val lastUserIndex = request.messages.indexOfLast { it.role == MessageRole.USER }
         request.messages.forEachIndexed { index, msg ->
-            if (msg.role == MessageRole.SYSTEM) return@forEachIndexed
-            val roleStr = when (msg.role) {
-                MessageRole.USER -> "user"
-                MessageRole.ASSISTANT -> "assistant"
-                MessageRole.SYSTEM -> "system"
-            }
-
-            if (index == lastUserIndex && request.attachments.isNotEmpty()) {
-                val contentWithTextFiles = appendTextAttachments(msg.content, request.attachments)
-                val images = if (supportsVision) {
-                    request.attachments.filter { it.isSupported && !it.imageBase64.isNullOrBlank() }
-                } else {
-                    emptyList()
-                }
-                if (images.isNotEmpty()) {
-                    val parts = JSONArray()
-                    parts.put(JSONObject().put("type", "text").put("text", contentWithTextFiles))
-                    images.forEach { img ->
-                        val mime = img.mimeType.ifBlank { "image/jpeg" }
-                        parts.put(
-                            JSONObject()
-                                .put("type", "image_url")
-                                .put(
-                                    "image_url",
-                                    JSONObject().put("url", "data:$mime;base64,${img.imageBase64}")
+            when (msg.role) {
+                MessageRole.SYSTEM -> return@forEachIndexed
+                MessageRole.USER -> {
+                    if (index == lastUserIndex && request.attachments.isNotEmpty()) {
+                        val contentWithTextFiles = appendTextAttachments(msg.content, request.attachments)
+                        val images = if (supportsVision) {
+                            request.attachments.filter { it.isSupported && !it.imageBase64.isNullOrBlank() }
+                        } else {
+                            emptyList()
+                        }
+                        if (images.isNotEmpty()) {
+                            val parts = JSONArray()
+                            parts.put(JSONObject().put("type", "text").put("text", contentWithTextFiles))
+                            images.forEach { img ->
+                                val mime = img.mimeType.ifBlank { "image/jpeg" }
+                                parts.put(
+                                    JSONObject()
+                                        .put("type", "image_url")
+                                        .put(
+                                            "image_url",
+                                            JSONObject().put("url", "data:$mime;base64,${img.imageBase64}")
+                                        )
                                 )
-                        )
+                            }
+                            messagesArray.put(JSONObject().put("role", "user").put("content", parts))
+                        } else {
+                            messagesArray.put(JSONObject().put("role", "user").put("content", contentWithTextFiles))
+                        }
+                    } else {
+                        messagesArray.put(JSONObject().put("role", "user").put("content", msg.content))
                     }
-                    messagesArray.put(JSONObject().put("role", roleStr).put("content", parts))
-                } else {
-                    messagesArray.put(JSONObject().put("role", roleStr).put("content", contentWithTextFiles))
                 }
-            } else {
-                messagesArray.put(JSONObject().put("role", roleStr).put("content", msg.content))
+                MessageRole.ASSISTANT -> {
+                    val obj = JSONObject().put("role", "assistant")
+                    if (msg.toolCalls.isNotEmpty()) {
+                        obj.put("content", msg.content.ifBlank { JSONObject.NULL })
+                        val callsArr = JSONArray()
+                        msg.toolCalls.forEach { tc ->
+                            callsArr.put(
+                                JSONObject()
+                                    .put("id", tc.id)
+                                    .put("type", "function")
+                                    .put(
+                                        "function",
+                                        JSONObject()
+                                            .put("name", tc.toolName)
+                                            .put("arguments", tc.argumentsJson.ifBlank { "{}" })
+                                    )
+                            )
+                        }
+                        obj.put("tool_calls", callsArr)
+                    } else {
+                        obj.put("content", msg.content)
+                    }
+                    messagesArray.put(obj)
+                }
+                MessageRole.TOOL -> {
+                    val obj = JSONObject()
+                        .put("role", "tool")
+                        .put("tool_call_id", msg.toolCallId ?: "")
+                        .put("content", msg.content)
+                    if (!msg.toolName.isNullOrBlank()) {
+                        obj.put("name", msg.toolName)
+                    }
+                    messagesArray.put(obj)
+                }
             }
         }
 
         root.put("messages", messagesArray)
+
+        if (request.allowTools && request.tools.isNotEmpty()) {
+            val toolsArr = JSONArray()
+            request.tools.forEach { tool ->
+                toolsArr.put(
+                    JSONObject()
+                        .put("type", "function")
+                        .put(
+                            "function",
+                            JSONObject()
+                                .put("name", tool.name)
+                                .put("description", tool.description)
+                                .put("parameters", buildJsonSchemaObject(tool))
+                        )
+                )
+            }
+            root.put("tools", toolsArr)
+            root.put("tool_choice", "auto")
+        }
+
         return root.toString()
+    }
+
+    fun buildJsonSchemaObject(tool: ToolDefinition, uppercaseTypes: Boolean = false): JSONObject {
+        val props = JSONObject()
+        val requiredArr = JSONArray()
+        tool.parameters.forEach { param ->
+            val pObj = JSONObject()
+                .put(
+                    "type",
+                    if (uppercaseTypes) param.type.jsonType.uppercase() else param.type.jsonType
+                )
+                .put("description", param.description)
+            if (param.enumValues.isNotEmpty()) {
+                val enumArr = JSONArray()
+                param.enumValues.forEach { enumArr.put(it) }
+                pObj.put("enum", enumArr)
+            }
+            props.put(param.name, pObj)
+            if (param.required) {
+                requiredArr.put(param.name)
+            }
+        }
+        return JSONObject()
+            .put("type", if (uppercaseTypes) "OBJECT" else "object")
+            .put("properties", props)
+            .apply {
+                if (requiredArr.length() > 0) {
+                    put("required", requiredArr)
+                }
+            }
     }
 
     fun appendTextAttachments(baseText: String, attachments: List<AttachmentPayload>): String {
@@ -95,8 +179,71 @@ internal object OpenAiCompatibleJson {
         }
     }
 
+    data class StreamToolCallFragment(
+        val index: Int,
+        val id: String?,
+        val name: String?,
+        val argumentsDelta: String
+    )
+
+    class OpenAiToolCallAccumulator {
+        private class MutableSlot(
+            var id: String? = null,
+            val nameBuilder: StringBuilder = StringBuilder(),
+            val argsBuilder: StringBuilder = StringBuilder()
+        )
+
+        private val slots = linkedMapOf<Int, MutableSlot>()
+        private val completeToolCallsFromNonStream = mutableListOf<ToolCall>()
+
+        fun addFragment(fragment: StreamToolCallFragment) {
+            val slot = slots.getOrPut(fragment.index) { MutableSlot() }
+            if (!fragment.id.isNullOrBlank()) {
+                slot.id = fragment.id
+            }
+            if (!fragment.name.isNullOrBlank()) {
+                slot.nameBuilder.append(fragment.name)
+            }
+            if (fragment.argumentsDelta.isNotEmpty()) {
+                slot.argsBuilder.append(fragment.argumentsDelta)
+            }
+        }
+
+        fun addCompleteToolCalls(calls: List<ToolCall>) {
+            calls.forEach { call ->
+                if (completeToolCallsFromNonStream.none { it.id == call.id && it.toolName == call.toolName }) {
+                    completeToolCallsFromNonStream.add(call)
+                }
+            }
+        }
+
+        fun isEmpty(): Boolean = slots.isEmpty() && completeToolCallsFromNonStream.isEmpty()
+
+        fun buildToolCalls(): List<ToolCall> {
+            if (completeToolCallsFromNonStream.isNotEmpty()) {
+                return completeToolCallsFromNonStream.toList()
+            }
+            return slots.entries
+                .sortedBy { it.key }
+                .mapNotNull { (idx, slot) ->
+                    val name = slot.nameBuilder.toString().trim()
+                    if (name.isEmpty()) return@mapNotNull null
+                    val id = slot.id?.takeIf { it.isNotBlank() } ?: "call_${idx}_$name"
+                    val rawArgs = slot.argsBuilder.toString().trim().ifEmpty { "{}" }
+                    ToolCall(id = id, toolName = name, argumentsJson = rawArgs)
+                }
+        }
+    }
+
     sealed interface ParsedSseChunk {
-        data class Delta(val text: String, val usage: TokenUsage? = null) : ParsedSseChunk
+        data class Content(
+            val text: String = "",
+            val toolCallFragments: List<StreamToolCallFragment> = emptyList(),
+            val completeToolCalls: List<ToolCall> = emptyList(),
+            val usage: TokenUsage? = null,
+            val finishReason: String? = null
+        ) : ParsedSseChunk
+
         data class UsageOnly(val usage: TokenUsage) : ParsedSseChunk
         data class Error(val error: ProviderError) : ParsedSseChunk
         data object Ignore : ParsedSseChunk
@@ -132,29 +279,67 @@ internal object OpenAiCompatibleJson {
         }
 
         val first = choices.optJSONObject(0) ?: return ParsedSseChunk.Ignore
+        val finishReason = first.optString("finish_reason").takeIf { it.isNotBlank() && it != "null" }
         val delta = first.optJSONObject("delta")
+        val messageObj = first.optJSONObject("message")
+
         val text = when {
-            delta != null && delta.has("content") && !delta.isNull("content") -> {
+            delta != null && delta.has("content") && !delta.isNull("content") ->
                 delta.optString("content", "")
-            }
-            first.has("message") -> {
-                first.optJSONObject("message")?.optString("content", "") ?: ""
-            }
+            messageObj != null && messageObj.has("content") && !messageObj.isNull("content") ->
+                messageObj.optString("content", "")
             else -> ""
         }
 
+        val fragments = mutableListOf<StreamToolCallFragment>()
+        val deltaCalls = delta?.optJSONArray("tool_calls")
+        if (deltaCalls != null) {
+            for (i in 0 until deltaCalls.length()) {
+                val item = deltaCalls.optJSONObject(i) ?: continue
+                val idx = item.optInt("index", i)
+                val id = item.optString("id").takeIf { it.isNotBlank() && it != "null" }
+                val fn = item.optJSONObject("function")
+                val name = fn?.optString("name")?.takeIf { it.isNotBlank() && it != "null" }
+                val argsDelta = fn?.optString("arguments", "") ?: ""
+                fragments.add(
+                    StreamToolCallFragment(
+                        index = idx,
+                        id = id,
+                        name = name,
+                        argumentsDelta = argsDelta
+                    )
+                )
+            }
+        }
+
+        val completeCalls = parseToolCallsArray(messageObj?.optJSONArray("tool_calls"))
+
         return when {
-            text.isNotEmpty() -> ParsedSseChunk.Delta(text = text, usage = usage)
+            text.isNotEmpty() || fragments.isNotEmpty() || completeCalls.isNotEmpty() || finishReason != null -> {
+                ParsedSseChunk.Content(
+                    text = text,
+                    toolCallFragments = fragments,
+                    completeToolCalls = completeCalls,
+                    usage = usage,
+                    finishReason = finishReason
+                )
+            }
             usage != null -> ParsedSseChunk.UsageOnly(usage)
             else -> ParsedSseChunk.Ignore
         }
     }
 
-    fun parsePlainJsonCompletion(
+    data class PlainCompletionResult(
+        val content: String,
+        val toolCalls: List<ToolCall>,
+        val usage: TokenUsage?
+    )
+
+    fun parsePlainJsonCompletionDetailed(
         body: String,
         secretToSanitize: String?,
         modelId: String?
-    ): Pair<String, TokenUsage?> {
+    ): PlainCompletionResult {
         val json = runCatching { JSONObject(body) }.getOrNull()
             ?: throw ProviderException(
                 ProviderError.MalformedResponse("Provider returned invalid JSON response.")
@@ -171,11 +356,46 @@ internal object OpenAiCompatibleJson {
         }
         val usage = parseUsage(json.optJSONObject("usage"))
         val choices = json.optJSONArray("choices")
-        val content = choices?.optJSONObject(0)?.optJSONObject("message")?.optString("content", "")
+        val messageObj = choices?.optJSONObject(0)?.optJSONObject("message")
             ?: throw ProviderException(
-                ProviderError.MalformedResponse("Provider response missing choices[0].message.content.")
+                ProviderError.MalformedResponse("Provider response missing choices[0].message.")
             )
-        return content to usage
+        val content = if (messageObj.has("content") && !messageObj.isNull("content")) {
+            messageObj.optString("content", "")
+        } else {
+            ""
+        }
+        val toolCalls = parseToolCallsArray(messageObj.optJSONArray("tool_calls"))
+        if (!messageObj.has("content") && toolCalls.isEmpty()) {
+            throw ProviderException(
+                ProviderError.MalformedResponse("Provider response missing choices[0].message.content or tool_calls.")
+            )
+        }
+        return PlainCompletionResult(content = content, toolCalls = toolCalls, usage = usage)
+    }
+
+    fun parsePlainJsonCompletion(
+        body: String,
+        secretToSanitize: String?,
+        modelId: String?
+    ): Pair<String, TokenUsage?> {
+        val detailed = parsePlainJsonCompletionDetailed(body, secretToSanitize, modelId)
+        return detailed.content to detailed.usage
+    }
+
+    private fun parseToolCallsArray(arr: JSONArray?): List<ToolCall> {
+        if (arr == null) return emptyList()
+        val calls = mutableListOf<ToolCall>()
+        for (i in 0 until arr.length()) {
+            val item = arr.optJSONObject(i) ?: continue
+            val fn = item.optJSONObject("function") ?: continue
+            val name = fn.optString("name").trim()
+            if (name.isBlank()) continue
+            val id = item.optString("id").takeIf { it.isNotBlank() } ?: "call_${i}_$name"
+            val args = fn.optString("arguments", "{}").ifBlank { "{}" }
+            calls.add(ToolCall(id = id, toolName = name, argumentsJson = args))
+        }
+        return calls
     }
 
     fun parseUsage(usageObj: JSONObject?): TokenUsage? {
@@ -239,6 +459,24 @@ internal object OpenAiCompatibleJson {
                 false
             }
 
+            val supportsTools = when {
+                supportedParams != null -> hasToolsParam
+                inferFromId -> {
+                    val excluded = lowerId.contains("audio") ||
+                        lowerId.contains("realtime") ||
+                        lowerId.contains("transcribe") ||
+                        lowerId.contains("tts") ||
+                        lowerId.contains("search-preview")
+                    !excluded && (
+                        lowerId.contains("gpt-4") ||
+                            lowerId.contains("gpt-5") ||
+                            lowerId.contains("o3") ||
+                            lowerId.contains("o4")
+                        )
+                }
+                else -> false
+            }
+
             list.add(
                 AiModelInfo(
                     id = id,
@@ -246,7 +484,7 @@ internal object OpenAiCompatibleJson {
                     contextWindowLabel = formatContextLabel(ctxTokens),
                     contextLengthTokens = ctxTokens,
                     supportsVision = supportsVision,
-                    supportsTools = hasToolsParam,
+                    supportsTools = supportsTools,
                     isManualEntry = false,
                     isCatalogVerified = true
                 )

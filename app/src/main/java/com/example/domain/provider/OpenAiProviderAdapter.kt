@@ -7,7 +7,7 @@ import com.example.domain.model.TokenUsage
 import com.example.domain.security.ApiKeyMasker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.channelFlow
 
 class OpenAiProviderAdapter(
     private val httpClient: NexaHttpClient
@@ -72,19 +72,19 @@ class OpenAiProviderAdapter(
         config: ProviderConfig,
         rawApiKey: String,
         request: ProviderRequest
-    ): Flow<ProviderStreamEvent> = flow {
+    ): Flow<ProviderStreamEvent> = channelFlow {
         if (rawApiKey.isBlank()) {
-            emit(ProviderStreamEvent.Failed(ProviderError.MissingApiKey("Configure an OpenAI API key in Connections.")))
-            return@flow
+            send(ProviderStreamEvent.Failed(ProviderError.MissingApiKey("Configure an OpenAI API key in Connections.")))
+            return@channelFlow
         }
         val baseUrl = normalizedBaseUrl(config)
         if (baseUrl == null) {
-            emit(ProviderStreamEvent.Failed(ProviderError.InvalidEndpoint("OpenAI base URL must use HTTPS.")))
-            return@flow
+            send(ProviderStreamEvent.Failed(ProviderError.InvalidEndpoint("OpenAI base URL must use HTTPS.")))
+            return@channelFlow
         }
         if (request.modelId.isBlank()) {
-            emit(ProviderStreamEvent.Failed(ProviderError.UnsupportedModel("Select an OpenAI model first.")))
-            return@flow
+            send(ProviderStreamEvent.Failed(ProviderError.UnsupportedModel("Select an OpenAI model first.")))
+            return@channelFlow
         }
 
         val lowerModel = request.modelId.lowercase()
@@ -101,6 +101,7 @@ class OpenAiProviderAdapter(
 
         var latestUsage: TokenUsage? = null
         var emittedError: ProviderError? = null
+        val toolCallAccumulator = OpenAiCompatibleJson.OpenAiToolCallAccumulator()
 
         val result = try {
             httpClient.streamSsePost(
@@ -111,17 +112,33 @@ class OpenAiProviderAdapter(
                 modelId = request.modelId,
                 onFrame = { frame ->
                     when (val parsed = OpenAiCompatibleJson.parseStreamChunk(frame.data, rawApiKey, request.modelId)) {
-                        is OpenAiCompatibleJson.ParsedSseChunk.Delta -> {
+                        is OpenAiCompatibleJson.ParsedSseChunk.Content -> {
                             if (parsed.usage != null) {
                                 latestUsage = parsed.usage
-                                emit(ProviderStreamEvent.Usage(parsed.usage))
+                                send(ProviderStreamEvent.Usage(parsed.usage))
                             }
-                            emit(ProviderStreamEvent.Delta(parsed.text))
+                            if (parsed.text.isNotEmpty()) {
+                                send(ProviderStreamEvent.Delta(parsed.text))
+                            }
+                            parsed.toolCallFragments.forEach { frag ->
+                                toolCallAccumulator.addFragment(frag)
+                                send(
+                                    ProviderStreamEvent.ToolCallDelta(
+                                        index = frag.index,
+                                        id = frag.id,
+                                        name = frag.name,
+                                        argumentsDelta = frag.argumentsDelta
+                                    )
+                                )
+                            }
+                            if (parsed.completeToolCalls.isNotEmpty()) {
+                                toolCallAccumulator.addCompleteToolCalls(parsed.completeToolCalls)
+                            }
                             true
                         }
                         is OpenAiCompatibleJson.ParsedSseChunk.UsageOnly -> {
                             latestUsage = parsed.usage
-                            emit(ProviderStreamEvent.Usage(parsed.usage))
+                            send(ProviderStreamEvent.Usage(parsed.usage))
                             true
                         }
                         is OpenAiCompatibleJson.ParsedSseChunk.Error -> {
@@ -132,16 +149,19 @@ class OpenAiProviderAdapter(
                     }
                 },
                 onPlainJsonFallback = { jsonText ->
-                    val (content, usage) = OpenAiCompatibleJson.parsePlainJsonCompletion(
+                    val parsed = OpenAiCompatibleJson.parsePlainJsonCompletionDetailed(
                         jsonText,
                         rawApiKey,
                         request.modelId
                     )
-                    if (usage != null) {
-                        latestUsage = usage
-                        emit(ProviderStreamEvent.Usage(usage))
+                    if (parsed.usage != null) {
+                        latestUsage = parsed.usage
+                        send(ProviderStreamEvent.Usage(parsed.usage))
                     }
-                    if (content.isNotEmpty()) emit(ProviderStreamEvent.Delta(content))
+                    if (parsed.content.isNotEmpty()) send(ProviderStreamEvent.Delta(parsed.content))
+                    if (parsed.toolCalls.isNotEmpty()) {
+                        toolCallAccumulator.addCompleteToolCalls(parsed.toolCalls)
+                    }
                 }
             )
         } catch (ce: CancellationException) {
@@ -152,9 +172,13 @@ class OpenAiProviderAdapter(
             (it as? ProviderException)?.error ?: NexaHttpClient.mapThrowableToError(it, rawApiKey)
         }
         if (terminalErr != null) {
-            emit(ProviderStreamEvent.Failed(terminalErr))
+            send(ProviderStreamEvent.Failed(terminalErr))
         } else {
-            emit(ProviderStreamEvent.Completed(latestUsage))
+            val assembled = toolCallAccumulator.buildToolCalls()
+            if (assembled.isNotEmpty()) {
+                send(ProviderStreamEvent.ToolCallsCompleted(assembled, latestUsage))
+            }
+            send(ProviderStreamEvent.Completed(latestUsage))
         }
     }
 

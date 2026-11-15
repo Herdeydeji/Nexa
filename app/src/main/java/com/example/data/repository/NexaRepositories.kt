@@ -8,6 +8,7 @@ import com.example.data.local.NexaPreferencesDataStore
 import com.example.data.local.NexaTypeConverters
 import com.example.data.local.StoredStatusKind
 import com.example.data.local.TaskDao
+import com.example.data.local.TaskStepEntity
 import com.example.domain.agent.CapabilityInspector
 import com.example.domain.model.AgentTask
 import com.example.domain.model.AgentTaskStatus
@@ -23,8 +24,11 @@ import com.example.domain.model.MessageRole
 import com.example.domain.model.MessageStatus
 import com.example.domain.model.ProviderConfig
 import com.example.domain.model.ProviderConnectionStatus
+import com.example.domain.model.TaskSummary
+import com.example.domain.model.TaskVerificationSummary
 import com.example.domain.model.TelegramConfig
 import com.example.domain.model.TokenUsage
+import com.example.domain.model.ToolCall
 import com.example.domain.provider.AiProviderRegistry
 import com.example.domain.provider.ConnectionTestResult
 import com.example.domain.provider.ProviderError
@@ -42,6 +46,12 @@ class ChatRepository(
     private val conversationDao: ConversationDao,
     private val converters: NexaTypeConverters
 ) {
+    private val lastTimestamp = java.util.concurrent.atomic.AtomicLong(0L)
+
+    private fun nextTimestamp(): Long = lastTimestamp.updateAndGet { prev ->
+        maxOf(System.currentTimeMillis(), prev + 1L)
+    }
+
     val conversations: Flow<List<Conversation>> =
         conversationDao.observeConversations().map { list ->
             list.map {
@@ -65,7 +75,7 @@ class ChatRepository(
         conversationDao.getMessagesSnapshot(conversationId).map { it.toDomain() }
 
     suspend fun createConversation(title: String = "New conversation"): String {
-        val now = System.currentTimeMillis()
+        val now = nextTimestamp()
         val id = "conv_${UUID.randomUUID()}"
         conversationDao.upsertConversation(
             ConversationEntity(
@@ -90,16 +100,26 @@ class ChatRepository(
         modelLabel: String? = null,
         tokenUsage: TokenUsage? = null,
         executionPlan: ExecutionPlan? = null,
+        taskSummary: TaskSummary? = null,
         attachments: List<String> = emptyList(),
-        isPreviewMessage: Boolean = false
+        isPreviewMessage: Boolean = false,
+        toolCalls: List<ToolCall> = emptyList(),
+        toolCallId: String? = null,
+        toolName: String? = null,
+        verificationSummary: TaskVerificationSummary? = null
     ): String {
-        val now = System.currentTimeMillis()
+        val now = nextTimestamp()
         val existing = conversationDao.getConversation(conversationId)
         val previewLine = buildPreviewLine(content, errorMessage)
         val updatedTitle = if (existing == null || (existing.title == "New conversation" && role == MessageRole.USER)) {
             content.trim().take(42).ifBlank { "New conversation" }
         } else {
             existing.title
+        }
+        val finalPreview = if (role == MessageRole.TOOL || (role == MessageRole.ASSISTANT && content.isBlank() && toolCalls.isNotEmpty())) {
+            existing?.lastMessagePreview ?: previewLine
+        } else {
+            previewLine.ifBlank { existing?.lastMessagePreview.orEmpty() }
         }
         conversationDao.upsertConversation(
             ConversationEntity(
@@ -108,7 +128,7 @@ class ChatRepository(
                 isSamplePreview = existing?.isSamplePreview ?: false,
                 createdAtMillis = existing?.createdAtMillis ?: now,
                 updatedAtMillis = now,
-                lastMessagePreview = previewLine
+                lastMessagePreview = finalPreview
             )
         )
         val messageId = "msg_${UUID.randomUUID()}"
@@ -120,7 +140,7 @@ class ChatRepository(
                 content = content,
                 createdAtMillis = now,
                 executionPlanJson = converters.encodeExecutionPlan(executionPlan),
-                taskSummaryJson = null,
+                taskSummaryJson = converters.encodeTaskSummary(taskSummary),
                 attachmentsJson = if (attachments.isEmpty()) null else converters.encodeStringList(attachments),
                 isPreviewMessage = isPreviewMessage,
                 status = status,
@@ -129,7 +149,11 @@ class ChatRepository(
                 modelLabel = modelLabel,
                 promptTokens = tokenUsage?.promptTokens,
                 completionTokens = tokenUsage?.completionTokens,
-                totalTokens = tokenUsage?.totalTokens
+                totalTokens = tokenUsage?.totalTokens,
+                toolCallsJson = converters.encodeToolCalls(toolCalls),
+                toolCallId = toolCallId,
+                toolName = toolName,
+                verificationJson = converters.encodeVerificationSummary(verificationSummary)
             )
         )
         return messageId
@@ -143,7 +167,10 @@ class ChatRepository(
         errorMessage: String? = null,
         providerLabel: String? = null,
         modelLabel: String? = null,
-        tokenUsage: TokenUsage? = null
+        tokenUsage: TokenUsage? = null,
+        executionPlan: ExecutionPlan? = null,
+        taskSummary: TaskSummary? = null,
+        verificationSummary: TaskVerificationSummary? = null
     ) {
         val existing = conversationDao.getMessageById(messageId) ?: return
         conversationDao.updateMessage(
@@ -155,7 +182,10 @@ class ChatRepository(
                 modelLabel = modelLabel ?: existing.modelLabel,
                 promptTokens = tokenUsage?.promptTokens ?: existing.promptTokens,
                 completionTokens = tokenUsage?.completionTokens ?: existing.completionTokens,
-                totalTokens = tokenUsage?.totalTokens ?: existing.totalTokens
+                totalTokens = tokenUsage?.totalTokens ?: existing.totalTokens,
+                executionPlanJson = executionPlan?.let { converters.encodeExecutionPlan(it) } ?: existing.executionPlanJson,
+                taskSummaryJson = taskSummary?.let { converters.encodeTaskSummary(it) } ?: existing.taskSummaryJson,
+                verificationJson = verificationSummary?.let { converters.encodeVerificationSummary(it) } ?: existing.verificationJson
             )
         )
         val preview = buildPreviewLine(content, errorMessage)
@@ -213,7 +243,11 @@ class ChatRepository(
             executionPlan = converters.decodeExecutionPlan(executionPlanJson),
             taskSummary = converters.decodeTaskSummary(taskSummaryJson),
             attachments = converters.decodeStringList(attachmentsJson),
-            isPreviewMessage = isPreviewMessage
+            isPreviewMessage = isPreviewMessage,
+            toolCalls = converters.decodeToolCalls(toolCallsJson),
+            toolCallId = toolCallId,
+            toolName = toolName,
+            verificationSummary = converters.decodeVerificationSummary(verificationJson)
         )
     }
 }
@@ -238,9 +272,91 @@ class TaskRepository(
                     detail = s.detail,
                     state = s.state,
                     toolName = s.toolName,
-                    timestampLabel = s.timestampLabel
+                    timestampLabel = s.timestampLabel,
+                    kind = s.kind
                 )
             }
+        )
+    }
+
+    suspend fun getTaskSnapshot(taskId: String): AgentTask? {
+        val task = taskDao.getTaskByIdSnapshot(taskId) ?: return null
+        val steps = taskDao.getStepsSnapshot(taskId).map { s ->
+            ExecutionStep(
+                id = s.id,
+                title = s.title,
+                detail = s.detail,
+                state = s.state,
+                toolName = s.toolName,
+                timestampLabel = s.timestampLabel,
+                kind = s.kind
+            )
+        }
+        return task.toDomain(steps)
+    }
+
+    suspend fun upsertLiveTask(
+        taskId: String,
+        title: String,
+        prompt: String,
+        status: AgentTaskStatus,
+        providerLabel: String,
+        modelLabel: String,
+        requiredCapabilities: List<String>,
+        steps: List<ExecutionStep>,
+        failureReason: String? = null,
+        summaryMessage: String? = null,
+        verificationSummary: TaskVerificationSummary? = null,
+        createdAtMillis: Long? = null
+    ) {
+        val existing = taskDao.getTaskByIdSnapshot(taskId)
+        val now = System.currentTimeMillis()
+        val entity = AgentTaskEntity(
+            id = taskId,
+            title = title,
+            prompt = prompt,
+            status = status,
+            isSampleData = false,
+            providerLabel = providerLabel,
+            modelLabel = modelLabel,
+            targetApp = existing?.targetApp ?: "Nexa Tools",
+            requiredCapabilitiesJson = converters.encodeStringList(requiredCapabilities),
+            failureReason = failureReason,
+            createdAtMillis = createdAtMillis ?: existing?.createdAtMillis ?: now,
+            updatedAtMillis = now,
+            summaryMessage = summaryMessage ?: existing?.summaryMessage,
+            verificationJson = converters.encodeVerificationSummary(verificationSummary) ?: existing?.verificationJson
+        )
+        val stepEntities = steps.mapIndexed { idx, step ->
+            TaskStepEntity(
+                id = "${taskId}_${step.id}",
+                taskId = taskId,
+                stepOrder = idx,
+                title = step.title,
+                detail = step.detail,
+                state = step.state,
+                toolName = step.toolName,
+                timestampLabel = step.timestampLabel,
+                kind = step.kind
+            )
+        }
+        taskDao.replaceTaskWithSteps(entity, stepEntities)
+    }
+
+    suspend fun updateLiveTaskOutcome(
+        taskId: String,
+        status: AgentTaskStatus,
+        failureReason: String? = null,
+        summaryMessage: String? = null,
+        verificationSummary: TaskVerificationSummary? = null
+    ) {
+        taskDao.updateTaskOutcome(
+            taskId = taskId,
+            status = status,
+            failureReason = failureReason,
+            summaryMessage = summaryMessage,
+            verificationJson = converters.encodeVerificationSummary(verificationSummary),
+            updatedAt = System.currentTimeMillis()
         )
     }
 
@@ -260,6 +376,8 @@ class TaskRepository(
         requiredCapabilities = converters.decodeStringList(requiredCapabilitiesJson),
         steps = steps,
         failureReason = failureReason,
+        summaryMessage = summaryMessage,
+        verificationSummary = converters.decodeVerificationSummary(verificationJson),
         createdAtMillis = createdAtMillis,
         updatedAtMillis = updatedAtMillis
     )
@@ -332,6 +450,7 @@ class ConnectionsRepository(
                 availableModels = mergedModels,
                 isConnected = stored?.statusKind == StoredStatusKind.CONNECTED,
                 credentialInvalidated = stored?.credentialInvalidated == true,
+                allowManualToolsOverride = stored?.allowManualToolsOverride == true,
                 connectionStatus = status
             )
         }
@@ -353,14 +472,16 @@ class ConnectionsRepository(
         baseUrl: String,
         selectedModelId: String?,
         manualModelId: String? = null,
-        setAsDefault: Boolean
+        setAsDefault: Boolean,
+        allowManualToolsOverride: Boolean? = null
     ) = prefs.saveProviderConfig(
         type = type,
         rawApiKey = rawApiKey,
         baseUrl = baseUrl,
         selectedModelId = selectedModelId,
         manualModelId = manualModelId,
-        setAsDefault = setAsDefault
+        setAsDefault = setAsDefault,
+        allowManualToolsOverride = allowManualToolsOverride
     )
 
     suspend fun saveManualModel(type: AiProviderType, modelId: String, setAsDefault: Boolean) =

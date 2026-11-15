@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -18,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
@@ -25,6 +27,7 @@ import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.SettingsEthernet
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -257,6 +260,23 @@ fun ModelSelectorSheet(
         (it.hasApiKey || (it.providerType.requiresBaseUrl && it.baseUrl.isNotBlank())) &&
             !it.credentialInvalidated
     }
+    var searchQuery by remember { mutableStateOf("") }
+    val filteredSections = remember(configuredProviders, searchQuery) {
+        val q = searchQuery.trim()
+        configuredProviders.mapNotNull { provider ->
+            if (q.isEmpty()) {
+                provider to provider.availableModels
+            } else if (provider.providerType.displayName.contains(q, ignoreCase = true)) {
+                provider to provider.availableModels
+            } else {
+                val matched = provider.availableModels.filter {
+                    it.id.contains(q, ignoreCase = true) ||
+                        it.displayName.contains(q, ignoreCase = true)
+                }
+                if (matched.isNotEmpty()) provider to matched else null
+            }
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -311,52 +331,99 @@ fun ModelSelectorSheet(
                     Text("Open AI Providers")
                 }
             } else {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    items(configuredProviders, key = { it.providerType.id }) { provider ->
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(NexaElevatedSurface)
-                                .border(1.dp, NexaBorder, RoundedCornerShape(12.dp))
-                                .padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = provider.providerType.displayName,
-                                    style = MaterialTheme.typography.titleSmall,
-                                    color = NexaTextPrimary
-                                )
-                                Text(
-                                    text = provider.maskedApiKey.ifBlank { "Endpoint only" },
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = NexaTextSecondary
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("model_selector_search_input"),
+                    label = { Text("Search models or providers") },
+                    placeholder = { Text("e.g. claude, gemini, gpt-4.1...") },
+                    singleLine = true,
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Outlined.Search,
+                            contentDescription = null,
+                            tint = NexaTextSecondary
+                        )
+                    },
+                    trailingIcon = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { searchQuery = "" }) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Close,
+                                    contentDescription = "Clear model search",
+                                    tint = NexaTextSecondary
                                 )
                             }
-                            if (provider.availableModels.isEmpty()) {
-                                Text(
-                                    text = "No models discovered yet. Open Connections to refresh models or enter a manual model ID.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = NexaTextSecondary
-                                )
+                        }
+                    }
+                )
+
+                if (filteredSections.isEmpty()) {
+                    Text(
+                        text = "No configured models match \"$searchQuery\".",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = NexaTextSecondary
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 420.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        filteredSections.forEach { (provider, models) ->
+                            item(key = "hdr_${provider.providerType.id}") {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = 6.dp, bottom = 2.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = provider.providerType.displayName,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = NexaTextPrimary
+                                    )
+                                    Text(
+                                        text = provider.maskedApiKey.ifBlank { "Endpoint only" },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = NexaTextSecondary
+                                    )
+                                }
+                            }
+                            if (models.isEmpty()) {
+                                item(key = "empty_${provider.providerType.id}") {
+                                    Text(
+                                        text = "No models discovered yet. Open Connections to refresh models or enter a manual model ID.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = NexaTextSecondary,
+                                        modifier = Modifier.padding(bottom = 6.dp)
+                                    )
+                                }
                             } else {
-                                provider.availableModels.take(16).forEach { model ->
+                                items(
+                                    items = models,
+                                    key = { model -> "${provider.providerType.id}:${model.id}" }
+                                ) { model ->
                                     val isSelected = provider.isDefault && provider.selectedModelId == model.id
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(if (isSelected) NexaOrangeMuted else NexaSecondaryBackground)
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(if (isSelected) NexaOrangeMuted else NexaElevatedSurface)
+                                            .border(
+                                                1.dp,
+                                                if (isSelected) NexaOrange else NexaBorder,
+                                                RoundedCornerShape(10.dp)
+                                            )
                                             .clickable {
                                                 onSelectModel(provider, model.id)
                                                 onDismiss()
                                             }
-                                            .padding(horizontal = 10.dp, vertical = 10.dp),
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
@@ -372,7 +439,13 @@ fun ModelSelectorSheet(
                                                 text = buildString {
                                                     append(model.id)
                                                     append(" · ")
-                                                    append(if (model.isManualEntry) "Manual" else "${model.contextWindowLabel} ctx")
+                                                    append(
+                                                        when {
+                                                            model.isManualEntry -> "Manual"
+                                                            model.isCatalogVerified -> "${model.contextWindowLabel} ctx · Live"
+                                                            else -> "${model.contextWindowLabel} ctx · Preset"
+                                                        }
+                                                    )
                                                     if (model.supportsVision) append(" · Vision")
                                                 },
                                                 style = MaterialTheme.typography.labelSmall,
@@ -523,8 +596,10 @@ fun VoiceInputSheet(
 @Composable
 fun ToolsCatalogSheet(
     tools: List<AgentTool>,
+    executableTools: List<com.example.domain.model.ToolDefinition> = emptyList(),
     onDismiss: () -> Unit
 ) {
+    val activeIds = executableTools.map { it.id }.toSet()
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         containerColor = NexaSecondaryBackground,
@@ -543,12 +618,64 @@ fun ToolsCatalogSheet(
                 color = NexaTextPrimary
             )
             Text(
-                text = "Tool contracts registered for Phase 3 autonomous Android execution (inactive during Phase 2 conversational chat).",
+                text = "Active Phase 3 tools can be invoked dynamically by tool-capable models. Device UI automation contracts remain disabled until Phase 4.",
                 style = MaterialTheme.typography.bodySmall,
                 color = NexaTextSecondary
             )
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(tools, key = { it.id }) { tool ->
+            LazyColumn(
+                modifier = Modifier.heightIn(max = 420.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(executableTools, key = { "exec_${it.id}" }) { def ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(NexaElevatedSurface)
+                            .border(1.dp, NexaBorder, RoundedCornerShape(12.dp))
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = def.name,
+                                style = MaterialTheme.typography.titleSmall,
+                                color = NexaTextPrimary
+                            )
+                            StatusPill(
+                                label = def.riskCategory.label,
+                                textColor = NexaSuccess,
+                                containerColor = NexaSuccessContainer,
+                                showDot = false
+                            )
+                        }
+                        Text(
+                            text = def.description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = NexaTextSecondary
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "${def.id} (${def.parameters.size} param${if (def.parameters.size == 1) "" else "s"})",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = NexaTextSecondary
+                            )
+                            Text(
+                                text = if (def.isImplemented) "Active (Phase 3)" else "Disabled",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (def.isImplemented) NexaSuccess else NexaNeutral
+                            )
+                        }
+                    }
+                }
+                items(tools.filterNot { it.id in activeIds }, key = { it.id }) { tool ->
                     val (riskFg, riskBg) = when (tool.riskLevel) {
                         ToolRiskLevel.LOW -> NexaSuccess to NexaSuccessContainer
                         ToolRiskLevel.MEDIUM -> NexaWarning to NexaWarningContainer
@@ -595,7 +722,7 @@ fun ToolsCatalogSheet(
                                 color = NexaTextSecondary
                             )
                             Text(
-                                text = if (tool.isPhase1Implemented) "Active (Attachments)" else "Phase 3 Runtime",
+                                text = if (tool.isPhase1Implemented) "Active (Attachments)" else "Planned (Disabled)",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = if (tool.isPhase1Implemented) NexaSuccess else NexaNeutral
                             )

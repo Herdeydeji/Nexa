@@ -20,7 +20,7 @@
     <string name="tasks_tab_awaiting">Awaiting Approval</string>
     <string name="tasks_tab_completed">Completed</string>
     <string name="tasks_tab_failed">Failed</string>
-    <string name="tasks_sample_banner">Sample execution previews only — live Android device automation arrives in Phase 3.</string>
+    <string name="tasks_sample_banner">Sample preview workflows — live tool-calling tasks created in Chat appear here automatically.</string>
 
     <string name="connections_title">Connections</string>
     <string name="connections_tab_providers">AI Providers</string>
@@ -28,5 +28,5 @@
     <string name="connections_tab_capabilities">Capabilities</string>
 
     <string name="settings_title">Settings</string>
-    <string name="nexa_version">Phase 2 Conversational AI · v1.1.0</string>
+    <string name="nexa_version">Phase 3 Agent Core · v1.2.0</string>
 </resources>

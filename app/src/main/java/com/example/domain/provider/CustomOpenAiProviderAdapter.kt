@@ -7,7 +7,7 @@ import com.example.domain.model.TokenUsage
 import com.example.domain.security.ApiKeyMasker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.channelFlow
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -57,8 +57,6 @@ class CustomOpenAiProviderAdapter(
             return ConnectionTestResult.Failure(err)
         }
 
-        // Some minimal OpenAI-compatible servers do not expose GET /models (404/405).
-        // If a model ID is configured, verify /chat/completions with a minimal probe.
         val probeModel = config.selectedModelId?.takeIf { it.isNotBlank() }
         if (probeModel != null) {
             val probeBody = JSONObject()
@@ -134,15 +132,15 @@ class CustomOpenAiProviderAdapter(
         config: ProviderConfig,
         rawApiKey: String,
         request: ProviderRequest
-    ): Flow<ProviderStreamEvent> = flow {
+    ): Flow<ProviderStreamEvent> = channelFlow {
         val urlValidation = ApiKeyMasker.validateEndpointUrl(config.baseUrl, required = true)
         if (urlValidation is ApiKeyMasker.ValidationResult.Invalid) {
-            emit(ProviderStreamEvent.Failed(ProviderError.InvalidEndpoint(urlValidation.reason)))
-            return@flow
+            send(ProviderStreamEvent.Failed(ProviderError.InvalidEndpoint(urlValidation.reason)))
+            return@channelFlow
         }
         if (request.modelId.isBlank()) {
-            emit(ProviderStreamEvent.Failed(ProviderError.UnsupportedModel("Enter or select a model ID for this endpoint.")))
-            return@flow
+            send(ProviderStreamEvent.Failed(ProviderError.UnsupportedModel("Enter or select a model ID for this endpoint.")))
+            return@channelFlow
         }
 
         val baseUrl = config.baseUrl.trim().trimEnd('/')
@@ -157,6 +155,7 @@ class CustomOpenAiProviderAdapter(
 
         var latestUsage: TokenUsage? = null
         var emittedError: ProviderError? = null
+        val toolCallAccumulator = OpenAiCompatibleJson.OpenAiToolCallAccumulator()
 
         val result = try {
             httpClient.streamSsePost(
@@ -167,17 +166,33 @@ class CustomOpenAiProviderAdapter(
                 modelId = request.modelId,
                 onFrame = { frame ->
                     when (val parsed = OpenAiCompatibleJson.parseStreamChunk(frame.data, rawApiKey, request.modelId)) {
-                        is OpenAiCompatibleJson.ParsedSseChunk.Delta -> {
+                        is OpenAiCompatibleJson.ParsedSseChunk.Content -> {
                             if (parsed.usage != null) {
                                 latestUsage = parsed.usage
-                                emit(ProviderStreamEvent.Usage(parsed.usage))
+                                send(ProviderStreamEvent.Usage(parsed.usage))
                             }
-                            emit(ProviderStreamEvent.Delta(parsed.text))
+                            if (parsed.text.isNotEmpty()) {
+                                send(ProviderStreamEvent.Delta(parsed.text))
+                            }
+                            parsed.toolCallFragments.forEach { frag ->
+                                toolCallAccumulator.addFragment(frag)
+                                send(
+                                    ProviderStreamEvent.ToolCallDelta(
+                                        index = frag.index,
+                                        id = frag.id,
+                                        name = frag.name,
+                                        argumentsDelta = frag.argumentsDelta
+                                    )
+                                )
+                            }
+                            if (parsed.completeToolCalls.isNotEmpty()) {
+                                toolCallAccumulator.addCompleteToolCalls(parsed.completeToolCalls)
+                            }
                             true
                         }
                         is OpenAiCompatibleJson.ParsedSseChunk.UsageOnly -> {
                             latestUsage = parsed.usage
-                            emit(ProviderStreamEvent.Usage(parsed.usage))
+                            send(ProviderStreamEvent.Usage(parsed.usage))
                             true
                         }
                         is OpenAiCompatibleJson.ParsedSseChunk.Error -> {
@@ -188,16 +203,19 @@ class CustomOpenAiProviderAdapter(
                     }
                 },
                 onPlainJsonFallback = { jsonText ->
-                    val (content, usage) = OpenAiCompatibleJson.parsePlainJsonCompletion(
+                    val parsed = OpenAiCompatibleJson.parsePlainJsonCompletionDetailed(
                         jsonText,
                         rawApiKey,
                         request.modelId
                     )
-                    if (usage != null) {
-                        latestUsage = usage
-                        emit(ProviderStreamEvent.Usage(usage))
+                    if (parsed.usage != null) {
+                        latestUsage = parsed.usage
+                        send(ProviderStreamEvent.Usage(parsed.usage))
                     }
-                    if (content.isNotEmpty()) emit(ProviderStreamEvent.Delta(content))
+                    if (parsed.content.isNotEmpty()) send(ProviderStreamEvent.Delta(parsed.content))
+                    if (parsed.toolCalls.isNotEmpty()) {
+                        toolCallAccumulator.addCompleteToolCalls(parsed.toolCalls)
+                    }
                 }
             )
         } catch (ce: CancellationException) {
@@ -208,9 +226,13 @@ class CustomOpenAiProviderAdapter(
             (it as? ProviderException)?.error ?: NexaHttpClient.mapThrowableToError(it, rawApiKey)
         }
         if (terminalErr != null) {
-            emit(ProviderStreamEvent.Failed(terminalErr))
+            send(ProviderStreamEvent.Failed(terminalErr))
         } else {
-            emit(ProviderStreamEvent.Completed(latestUsage))
+            val assembled = toolCallAccumulator.buildToolCalls()
+            if (assembled.isNotEmpty()) {
+                send(ProviderStreamEvent.ToolCallsCompleted(assembled, latestUsage))
+            }
+            send(ProviderStreamEvent.Completed(latestUsage))
         }
     }
 

@@ -6,6 +6,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
 import androidx.room.Update
+import androidx.room.Upsert
 import com.example.domain.model.AgentTaskStatus
 import kotlinx.coroutines.flow.Flow
 
@@ -20,7 +21,7 @@ interface ConversationDao {
     @Query("SELECT COUNT(*) FROM conversations")
     suspend fun countConversations(): Int
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertConversation(conversation: ConversationEntity)
 
     @Query("UPDATE conversations SET title = :title, updatedAtMillis = :updatedAt WHERE id = :id")
@@ -38,10 +39,10 @@ interface ConversationDao {
     @Query("DELETE FROM conversations")
     suspend fun clearAllConversations()
 
-    @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAtMillis ASC")
+    @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAtMillis ASC, rowid ASC")
     fun observeMessages(conversationId: String): Flow<List<MessageEntity>>
 
-    @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAtMillis ASC")
+    @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAtMillis ASC, rowid ASC")
     suspend fun getMessagesSnapshot(conversationId: String): List<MessageEntity>
 
     @Query("SELECT * FROM messages WHERE id = :messageId LIMIT 1")
@@ -68,8 +69,14 @@ interface TaskDao {
     @Query("SELECT * FROM agent_tasks WHERE id = :taskId LIMIT 1")
     fun observeTaskById(taskId: String): Flow<AgentTaskEntity?>
 
+    @Query("SELECT * FROM agent_tasks WHERE id = :taskId LIMIT 1")
+    suspend fun getTaskByIdSnapshot(taskId: String): AgentTaskEntity?
+
     @Query("SELECT * FROM task_steps WHERE taskId = :taskId ORDER BY stepOrder ASC")
     fun observeStepsForTask(taskId: String): Flow<List<TaskStepEntity>>
+
+    @Query("SELECT * FROM task_steps WHERE taskId = :taskId ORDER BY stepOrder ASC")
+    suspend fun getStepsSnapshot(taskId: String): List<TaskStepEntity>
 
     @Query("SELECT * FROM task_steps WHERE taskId IN (:taskIds) ORDER BY stepOrder ASC")
     fun observeStepsForTasks(taskIds: List<String>): Flow<List<TaskStepEntity>>
@@ -77,18 +84,50 @@ interface TaskDao {
     @Query("SELECT COUNT(*) FROM agent_tasks")
     suspend fun countTasks(): Int
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertTask(task: AgentTaskEntity)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSteps(steps: List<TaskStepEntity>)
 
+    @Query("DELETE FROM task_steps WHERE taskId = :taskId")
+    suspend fun deleteStepsForTask(taskId: String)
+
     @Query("UPDATE agent_tasks SET status = :status, updatedAtMillis = :updatedAt WHERE id = :taskId")
     suspend fun updateTaskStatus(taskId: String, status: AgentTaskStatus, updatedAt: Long)
+
+    @Query(
+        "UPDATE agent_tasks SET status = :status, failureReason = :failureReason, " +
+            "summaryMessage = :summaryMessage, verificationJson = :verificationJson, " +
+            "updatedAtMillis = :updatedAt WHERE id = :taskId"
+    )
+    suspend fun updateTaskOutcome(
+        taskId: String,
+        status: AgentTaskStatus,
+        failureReason: String?,
+        summaryMessage: String?,
+        verificationJson: String?,
+        updatedAt: Long
+    )
+
+    @Query(
+        "SELECT * FROM agent_tasks WHERE isSampleData = 0 AND " +
+            "status IN ('RUNNING', 'AWAITING_APPROVAL', 'PAUSED')"
+    )
+    suspend fun getActiveLiveTasks(): List<AgentTaskEntity>
 
     @Transaction
     suspend fun insertTaskWithSteps(task: AgentTaskEntity, steps: List<TaskStepEntity>) {
         upsertTask(task)
         insertSteps(steps)
+    }
+
+    @Transaction
+    suspend fun replaceTaskWithSteps(task: AgentTaskEntity, steps: List<TaskStepEntity>) {
+        upsertTask(task)
+        deleteStepsForTask(task.id)
+        if (steps.isNotEmpty()) {
+            insertSteps(steps)
+        }
     }
 }

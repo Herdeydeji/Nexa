@@ -126,7 +126,8 @@ class ConnectionsViewModel(
         selectedModelId: String?,
         manualModelId: String,
         setAsDefault: Boolean,
-        hasExistingKey: Boolean
+        hasExistingKey: Boolean,
+        allowManualToolsOverride: Boolean? = null
     ): String? {
         val urlValidation = ApiKeyMasker.validateEndpointUrl(baseUrl, required = type.requiresBaseUrl)
         if (urlValidation is ApiKeyMasker.ValidationResult.Invalid) {
@@ -156,7 +157,8 @@ class ConnectionsViewModel(
                 baseUrl = baseUrl.ifBlank { type.defaultBaseUrl },
                 selectedModelId = effectiveModelId,
                 manualModelId = cleanManual,
-                setAsDefault = setAsDefault
+                setAsDefault = setAsDefault,
+                allowManualToolsOverride = allowManualToolsOverride
             )
             refreshErrors.value = refreshErrors.value - type
         }

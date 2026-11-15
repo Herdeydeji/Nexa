@@ -6,6 +6,8 @@ import android.net.NetworkCapabilities
 import com.example.domain.security.ApiKeyMasker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.Call
@@ -153,6 +155,11 @@ class NexaHttpClient(
             .build()
 
         val call = okHttpClient.newCall(request)
+        val completionHandle = coroutineContext[Job]?.invokeOnCompletion { cause ->
+            if (cause != null) {
+                call.cancel()
+            }
+        }
         try {
             val response = call.awaitCancellable()
             response.use { resp ->
@@ -188,6 +195,7 @@ class NexaHttpClient(
                 val rawFallbackBuffer = StringBuilder()
 
                 while (true) {
+                    coroutineContext.ensureActive()
                     if (call.isCanceled()) {
                         return@withContext Result.failure(ProviderException(ProviderError.Cancelled()))
                     }
@@ -247,6 +255,8 @@ class NexaHttpClient(
             Result.failure(pe)
         } catch (t: Throwable) {
             Result.failure(ProviderException(mapThrowableToError(t, secretToSanitize)))
+        } finally {
+            completionHandle?.dispose()
         }
     }
 

@@ -91,11 +91,18 @@ fun TasksScreen(
                             style = MaterialTheme.typography.headlineMedium,
                             color = NexaTextPrimary
                         )
+                        val liveActiveCount = state.allTasks.count {
+                            !it.isSampleData && it.status in setOf(
+                                AgentTaskStatus.RUNNING,
+                                AgentTaskStatus.AWAITING_APPROVAL,
+                                AgentTaskStatus.PAUSED
+                            )
+                        }
                         Text(
                             text = if (state.includeSampleData) {
-                                "Viewing sample preview workflows"
+                                "Viewing sample + live workflows ($liveActiveCount active)"
                             } else {
-                                "Live execution queue (0 active)"
+                                "Live execution queue ($liveActiveCount active)"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = NexaTextSecondary
@@ -177,8 +184,10 @@ fun TasksScreen(
                     val emptyIcon = when (state.selectedTab) {
                         AgentTaskStatus.RUNNING -> Icons.Outlined.PlayCircleOutline
                         AgentTaskStatus.AWAITING_APPROVAL -> Icons.Outlined.HourglassTop
+                        AgentTaskStatus.PAUSED -> Icons.Outlined.HourglassTop
                         AgentTaskStatus.COMPLETED -> Icons.Outlined.AssignmentTurnedIn
                         AgentTaskStatus.FAILED -> Icons.Outlined.ErrorOutline
+                        AgentTaskStatus.CANCELLED -> Icons.Outlined.ErrorOutline
                     }
                     EmptyStateView(
                         icon = emptyIcon,
@@ -186,7 +195,7 @@ fun TasksScreen(
                         description = if (state.includeSampleData) {
                             "No tasks currently match this filter."
                         } else {
-                            "Real autonomous tasks will appear here once Phase 2 execution runtime is connected. Toggle 'Sample Data' above to preview UI states."
+                            "Autonomous tool-using tasks created in Chat will appear here in real time. Toggle 'Sample Data' above to preview sample workflows."
                         }
                     )
                 }
