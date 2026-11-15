@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="nexa_background">#101114</color>
+    <color name="nexa_surface">#181A1F</color>
+    <color name="nexa_elevated">#20232A</color>
+    <color name="nexa_orange">#F36B21</color>
+    <color name="nexa_text_primary">#F5F5F5</color>
+    <color name="nexa_text_secondary">#A0A3AA</color>
+</resources>

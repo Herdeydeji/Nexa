@@ -1,0 +1,6 @@
+{
+  "name": "Nexa",
+  "description": "Conversational AI assistant and autonomous Android computer-use agent foundation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
