@@ -3,6 +3,7 @@ package com.example.data.repository
 import com.example.data.local.AgentTaskEntity
 import com.example.data.local.ConversationDao
 import com.example.data.local.ConversationEntity
+import com.example.data.local.LocalMemoryStore
 import com.example.data.local.MessageEntity
 import com.example.data.local.NexaPreferencesDataStore
 import com.example.data.local.NexaTypeConverters
@@ -20,10 +21,12 @@ import com.example.domain.model.Conversation
 import com.example.domain.model.DeviceCapability
 import com.example.domain.model.ExecutionPlan
 import com.example.domain.model.ExecutionStep
+import com.example.domain.model.MemoryEntry
 import com.example.domain.model.MessageRole
 import com.example.domain.model.MessageStatus
 import com.example.domain.model.ProviderConfig
 import com.example.domain.model.ProviderConnectionStatus
+import com.example.domain.model.ResumableTaskSnapshot
 import com.example.domain.model.TaskSummary
 import com.example.domain.model.TaskVerificationSummary
 import com.example.domain.model.TelegramConfig
@@ -59,17 +62,11 @@ class ChatRepository(
 
     val conversations: Flow<List<Conversation>> =
         conversationDao.observeConversations().map { list ->
-            list.map {
-                Conversation(
-                    id = it.id,
-                    title = it.title,
-                    isSamplePreview = it.isSamplePreview,
-                    createdAtMillis = it.createdAtMillis,
-                    updatedAtMillis = it.updatedAtMillis,
-                    lastMessagePreview = it.lastMessagePreview
-                )
-            }
+            list.map { it.toDomain() }
         }
+
+    suspend fun getConversationsSnapshot(): List<Conversation> =
+        conversationDao.getAllConversationsSnapshot().map { it.toDomain() }
 
     fun observeMessages(conversationId: String): Flow<List<ChatMessage>> =
         conversationDao.observeMessages(conversationId).map { rows ->
@@ -79,7 +76,11 @@ class ChatRepository(
     suspend fun getMessagesSnapshot(conversationId: String): List<ChatMessage> =
         conversationDao.getMessagesSnapshot(conversationId).map { it.toDomain() }
 
-    suspend fun createConversation(title: String = "New conversation"): String {
+    suspend fun createConversation(
+        title: String = "New conversation",
+        preferredProviderId: String? = null,
+        preferredModelId: String? = null
+    ): String {
         val now = nextTimestamp()
         val id = "conv_${UUID.randomUUID()}"
         conversationDao.upsertConversation(
@@ -89,7 +90,9 @@ class ChatRepository(
                 isSamplePreview = false,
                 createdAtMillis = now,
                 updatedAtMillis = now,
-                lastMessagePreview = "Empty conversation"
+                lastMessagePreview = "Empty conversation",
+                preferredProviderId = preferredProviderId,
+                preferredModelId = preferredModelId
             )
         )
         return id
@@ -133,7 +136,9 @@ class ChatRepository(
                 isSamplePreview = existing?.isSamplePreview ?: false,
                 createdAtMillis = existing?.createdAtMillis ?: now,
                 updatedAtMillis = now,
-                lastMessagePreview = finalPreview
+                lastMessagePreview = finalPreview,
+                preferredProviderId = existing?.preferredProviderId,
+                preferredModelId = existing?.preferredModelId
             )
         )
         val messageId = "msg_${UUID.randomUUID()}"
@@ -218,9 +223,47 @@ class ChatRepository(
         conversationDao.deleteConversation(id)
     }
 
+    suspend fun updateConversationPreferredModel(
+        conversationId: String,
+        providerId: String?,
+        modelId: String?
+    ) {
+        conversationDao.updatePreferredModel(
+            id = conversationId,
+            providerId = providerId,
+            modelId = modelId,
+            updatedAt = System.currentTimeMillis()
+        )
+    }
+
+    suspend fun pruneExpiredConversations(
+        retentionDays: Int,
+        nowMillis: Long = System.currentTimeMillis(),
+        activeConversationIds: Set<String> = emptySet()
+    ): Int {
+        val days = retentionDays.coerceAtLeast(1)
+        val cutoffMillis = nowMillis - days.toLong() * 86_400_000L
+        return if (activeConversationIds.isEmpty()) {
+            conversationDao.deleteExpiredUserConversations(cutoffMillis)
+        } else {
+            conversationDao.deleteExpiredUserConversationsExcluding(cutoffMillis, activeConversationIds.toList())
+        }
+    }
+
     suspend fun clearAllConversations() {
         conversationDao.clearAllConversations()
     }
+
+    private fun ConversationEntity.toDomain(): Conversation = Conversation(
+        id = id,
+        title = title,
+        isSamplePreview = isSamplePreview,
+        createdAtMillis = createdAtMillis,
+        updatedAtMillis = updatedAtMillis,
+        lastMessagePreview = lastMessagePreview,
+        preferredProviderId = preferredProviderId,
+        preferredModelId = preferredModelId
+    )
 
     private fun buildPreviewLine(content: String, errorMessage: String?): String {
         val fromContent = content.lineSequence().firstOrNull { it.isNotBlank() }?.take(80)
@@ -284,6 +327,23 @@ class TaskRepository(
         )
     }
 
+    suspend fun getTasksSnapshot(limit: Int = 20): List<AgentTask> {
+        return taskDao.getTasksSnapshot(limit).map { entity ->
+            val steps = taskDao.getStepsSnapshot(entity.id).map { s ->
+                ExecutionStep(
+                    id = s.id,
+                    title = s.title,
+                    detail = s.detail,
+                    state = s.state,
+                    toolName = s.toolName,
+                    timestampLabel = s.timestampLabel,
+                    kind = s.kind
+                )
+            }
+            entity.toDomain(steps)
+        }
+    }
+
     suspend fun getTaskSnapshot(taskId: String): AgentTask? {
         val task = taskDao.getTaskByIdSnapshot(taskId) ?: return null
         val steps = taskDao.getStepsSnapshot(taskId).map { s ->
@@ -312,10 +372,19 @@ class TaskRepository(
         failureReason: String? = null,
         summaryMessage: String? = null,
         verificationSummary: TaskVerificationSummary? = null,
-        createdAtMillis: Long? = null
+        createdAtMillis: Long? = null,
+        targetApp: String? = null,
+        resumableSnapshot: ResumableTaskSnapshot? = null
     ) {
         val existing = taskDao.getTaskByIdSnapshot(taskId)
         val now = System.currentTimeMillis()
+        val encodedSnapshot = if (resumableSnapshot != null) {
+            converters.encodeResumableSnapshot(resumableSnapshot)
+        } else if (status == AgentTaskStatus.COMPLETED || status == AgentTaskStatus.CANCELLED) {
+            null
+        } else {
+            existing?.resumableSnapshotJson
+        }
         val entity = AgentTaskEntity(
             id = taskId,
             title = title,
@@ -324,13 +393,14 @@ class TaskRepository(
             isSampleData = false,
             providerLabel = providerLabel,
             modelLabel = modelLabel,
-            targetApp = existing?.targetApp ?: "Nexa Tools",
+            targetApp = targetApp ?: existing?.targetApp ?: "Nexa Tools",
             requiredCapabilitiesJson = converters.encodeStringList(requiredCapabilities),
             failureReason = failureReason,
             createdAtMillis = createdAtMillis ?: existing?.createdAtMillis ?: now,
             updatedAtMillis = now,
             summaryMessage = summaryMessage ?: existing?.summaryMessage,
-            verificationJson = converters.encodeVerificationSummary(verificationSummary) ?: existing?.verificationJson
+            verificationJson = converters.encodeVerificationSummary(verificationSummary) ?: existing?.verificationJson,
+            resumableSnapshotJson = encodedSnapshot
         )
         val stepEntities = steps.mapIndexed { idx, step ->
             TaskStepEntity(
@@ -383,6 +453,7 @@ class TaskRepository(
         failureReason = failureReason,
         summaryMessage = summaryMessage,
         verificationSummary = converters.decodeVerificationSummary(verificationJson),
+        resumableSnapshot = converters.decodeResumableSnapshot(resumableSnapshotJson),
         createdAtMillis = createdAtMillis,
         updatedAtMillis = updatedAtMillis
     )
@@ -631,4 +702,22 @@ class SettingsRepository(
 
     suspend fun updateSettings(transform: (AppSettings) -> AppSettings) =
         prefs.updateSettings(transform)
+}
+
+class MemoryRepository(
+    private val store: LocalMemoryStore
+) {
+    val memoryEntries: Flow<List<MemoryEntry>> = store.memoryEntries
+
+    suspend fun getSnapshot(): List<MemoryEntry> = store.getSnapshot()
+
+    suspend fun addMemory(text: String, category: String = "Preference"): MemoryEntry =
+        store.addMemory(text, category)
+
+    suspend fun updateMemory(id: String, text: String, category: String = "Preference") =
+        store.updateMemory(id, text, category)
+
+    suspend fun removeMemory(id: String) = store.removeMemory(id)
+
+    suspend fun clearAll() = store.clearAll()
 }

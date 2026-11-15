@@ -1,5 +1,6 @@
 package com.example.ui.chat
 
+import android.app.Activity
 import android.content.Intent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -7,9 +8,13 @@ import androidx.lifecycle.viewModelScope
 import com.example.android.accessibility.NexaAccessibilityService
 import com.example.android.media.MediaProjectionSessionManager
 import com.example.android.notifications.NexaTaskNotificationManager
+import com.example.android.overlay.FloatingIndicatorController
 import com.example.android.runtime.AndroidPermissionManager
+import com.example.android.security.ApprovalAuthResult
+import com.example.android.security.ApprovalAuthenticator
 import com.example.data.repository.ChatRepository
 import com.example.data.repository.ConnectionsRepository
+import com.example.data.repository.MemoryRepository
 import com.example.data.repository.SettingsRepository
 import com.example.data.repository.TaskRepository
 import com.example.domain.agent.ActiveAgentRunState
@@ -30,6 +35,8 @@ import com.example.domain.model.AgentExecutionContext
 import com.example.domain.model.AgentRunStatus
 import com.example.domain.model.AgentStatus
 import com.example.domain.model.AgentTaskStatus
+import com.example.domain.model.AiProviderType
+import com.example.domain.model.AmbiguitySelectionRequest
 import com.example.domain.model.AppSettings
 import com.example.domain.model.ApprovalDecision
 import com.example.domain.model.AttachmentPayload
@@ -44,12 +51,18 @@ import com.example.domain.model.MediaProjectionConsentState
 import com.example.domain.model.MessageRole
 import com.example.domain.model.MessageStatus
 import com.example.domain.model.ProviderConfig
+import com.example.domain.model.ResumableTaskSnapshot
 import com.example.domain.model.StepKind
 import com.example.domain.model.TaskSummary
+import com.example.domain.model.TaskVerificationSummary
+import com.example.domain.model.TokenUsage
 import com.example.domain.model.ToolApprovalRequest
+import com.example.domain.model.ToolCall
 import com.example.domain.model.ToolDefinition
 import com.example.domain.model.ToolDispatchDiagnostic
 import com.example.domain.model.ToolExecutionStatus
+import com.example.domain.model.ToolRiskCategory
+import com.example.domain.model.UserUnlockWaitRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -82,6 +95,8 @@ data class ChatUiState(
     val statusDetail: String = "",
     val liveSteps: List<ExecutionStep> = emptyList(),
     val pendingApproval: ToolApprovalRequest? = null,
+    val waitingForUnlock: UserUnlockWaitRequest? = null,
+    val pendingAmbiguity: AmbiguitySelectionRequest? = null,
     val isPaused: Boolean = false,
     val activeTaskId: String? = null,
     val isResponding: Boolean = false,
@@ -94,13 +109,24 @@ data class ChatUiState(
     val accessibilityState: AccessibilityRuntimeState = AccessibilityRuntimeState.SERVICE_DISABLED,
     val mediaProjectionState: MediaProjectionConsentState = MediaProjectionConsentState.NOT_GRANTED,
     val isMediaProjectionActive: Boolean = false,
-    val lastToolDiagnostic: ToolDispatchDiagnostic? = null
+    val lastToolDiagnostic: ToolDispatchDiagnostic? = null,
+    val isIncognitoConversation: Boolean = false,
+    val queuedPromptsCount: Int = 0,
+    val queueNotice: String? = null,
+    val biometricWarningBanner: String? = null,
+    val memorySavedNotice: String? = null
 )
 
 private data class StreamingOverlay(
     val messageId: String? = null,
     val text: String = "",
     val isResponding: Boolean = false
+)
+
+private data class QueuedPrompt(
+    val prompt: String,
+    val attachments: List<ComposerAttachment>,
+    val conversationId: String?
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -117,7 +143,10 @@ class ChatViewModel(
     private val agentRunController: AgentRunController = AgentRunController(),
     private val permissionManager: AndroidPermissionManager? = null,
     private val taskNotificationManager: NexaTaskNotificationManager? = null,
-    private val mediaProjectionSessionManager: MediaProjectionSessionManager? = null
+    private val mediaProjectionSessionManager: MediaProjectionSessionManager? = null,
+    private val floatingIndicatorController: FloatingIndicatorController? = null,
+    private val memoryRepository: MemoryRepository? = null,
+    private val approvalAuthenticator: ApprovalAuthenticator? = null
 ) : ViewModel() {
 
     private val orchestrator: AutonomousAgentOrchestrator = autonomousOrchestrator
@@ -136,10 +165,38 @@ class ChatViewModel(
     private val streamingOverlay = MutableStateFlow(StreamingOverlay())
     private val lastTurnAttachments = mutableMapOf<String, List<ComposerAttachment>>()
 
+    private val ephemeralConversations = MutableStateFlow<List<Conversation>>(emptyList())
+    private val ephemeralMessages = MutableStateFlow<Map<String, List<ChatMessage>>>(emptyMap())
+    private val promptQueue = ArrayDeque<QueuedPrompt>()
+    private val queuedCountState = MutableStateFlow(0)
+    private val queueNoticeState = MutableStateFlow<String?>(null)
+    private val biometricWarningState = MutableStateFlow<String?>(null)
+    private val memorySavedState = MutableStateFlow<String?>(null)
+    private var pendingCredentialApprovalCallId: String? = null
+    @Volatile
+    private var stopRequestedByUser: Boolean = false
+    @Volatile
+    private var latestSettings: AppSettings = AppSettings()
+
     private var responseJob: Job? = null
 
+    init {
+        viewModelScope.launch {
+            settingsRepository.settings.collect { latestSettings = it }
+        }
+    }
+
     private val activeMessagesFlow = selectedConversationId.flatMapLatest { id ->
-        if (id == null) flowOf(emptyList()) else chatRepository.observeMessages(id)
+        if (id == null) {
+            flowOf(emptyList())
+        } else {
+            combine(
+                chatRepository.observeMessages(id),
+                ephemeralMessages
+            ) { persisted, ephMap ->
+                ephMap[id] ?: persisted
+            }
+        }
     }
 
     private data class ChatMeta(
@@ -150,8 +207,15 @@ class ChatViewModel(
         val attachments: List<ComposerAttachment>
     )
 
-    private val chatMetaFlow = combine(
+    private val mergedConversationsFlow = combine(
         chatRepository.conversations,
+        ephemeralConversations
+    ) { persisted, ephemeral ->
+        (ephemeral + persisted).sortedByDescending { it.updatedAtMillis }
+    }
+
+    private val chatMetaFlow = combine(
+        mergedConversationsFlow,
         selectedConversationId,
         activeMessagesFlow,
         draftText,
@@ -168,8 +232,21 @@ class ChatViewModel(
         val notices: List<String>,
         val settings: AppSettings,
         val runState: ActiveAgentRunState,
-        val diagnostic: ToolDispatchDiagnostic?
+        val diagnostic: ToolDispatchDiagnostic?,
+        val queuedCount: Int,
+        val queueNotice: String?,
+        val biometricWarning: String?,
+        val memorySavedNotice: String?
     )
+
+    private val statusNoticesFlow = combine(
+        queuedCountState,
+        queueNoticeState,
+        biometricWarningState,
+        memorySavedState
+    ) { queued, qNotice, bioWarn, memSaved ->
+        arrayOf(queued, qNotice, bioWarn, memSaved)
+    }
 
     private val uiExtrasFlow = combine(
         streamingOverlay,
@@ -177,6 +254,7 @@ class ChatViewModel(
         settingsRepository.settings,
         agentRunController.state,
         lastToolDiagnosticState,
+        statusNoticesFlow,
         permissionRefreshTick
     ) { values ->
         val overlay = values[0] as StreamingOverlay
@@ -185,7 +263,19 @@ class ChatViewModel(
         val settings = values[2] as AppSettings
         val runState = values[3] as ActiveAgentRunState
         val diagnostic = values[4] as ToolDispatchDiagnostic?
-        UiExtras(overlay, notices, settings, runState, diagnostic)
+        @Suppress("UNCHECKED_CAST")
+        val extraStatus = values[5] as Array<Any?>
+        UiExtras(
+            overlay = overlay,
+            notices = notices,
+            settings = settings,
+            runState = runState,
+            diagnostic = diagnostic,
+            queuedCount = extraStatus[0] as Int,
+            queueNotice = extraStatus[1] as String?,
+            biometricWarning = extraStatus[2] as String?,
+            memorySavedNotice = extraStatus[3] as String?
+        )
     }
 
     val uiState: StateFlow<ChatUiState> = combine(
@@ -195,13 +285,20 @@ class ChatViewModel(
         connectionsRepository.capabilities,
         uiExtrasFlow
     ) { meta, providers, defaultProvider, capabilities, extras ->
-        val (overlay, notices, settings, runState, diagnostic) = extras
         val liveConversations = meta.conversations.filterNot { it.isSamplePreview }
         val resolvedActive = liveConversations.firstOrNull { it.id == meta.selectedId }
             ?: liveConversations.firstOrNull()
         if (resolvedActive != null && resolvedActive.id != meta.selectedId) {
             selectedConversationId.value = resolvedActive.id
         }
+        val overlay = extras.overlay
+        val notices = extras.notices
+        val settings = extras.settings
+        val runState = extras.runState
+        val diagnostic = extras.diagnostic
+        val activeIsEphemeral = resolvedActive?.id?.let { id ->
+            ephemeralConversations.value.any { it.id == id }
+        } == true || !settings.saveConversationHistory
 
         val visibleMessages = meta.messages
             .filter { msg ->
@@ -243,6 +340,10 @@ class ChatViewModel(
 
         val status = when {
             runState.isPaused -> AgentStatus.PAUSED
+            runState.waitingForUnlock != null ||
+                runState.pendingAmbiguity != null ||
+                runState.runStatus == AgentRunStatus.WAITING_FOR_USER_UNLOCK ||
+                runState.runStatus == AgentRunStatus.WAITING_FOR_AMBIGUITY_CHOICE -> AgentStatus.WAITING_FOR_USER
             runState.pendingApproval != null || runState.runStatus == AgentRunStatus.AWAITING_APPROVAL -> AgentStatus.AWAITING_CONFIRMATION
             runState.runStatus == AgentRunStatus.SELECTING_TOOL ||
                 runState.runStatus == AgentRunStatus.EXECUTING_TOOL ||
@@ -279,6 +380,8 @@ class ChatViewModel(
             statusDetail = runState.statusDetail,
             liveSteps = runState.liveSteps,
             pendingApproval = runState.pendingApproval,
+            waitingForUnlock = runState.waitingForUnlock,
+            pendingAmbiguity = runState.pendingAmbiguity,
             isPaused = runState.isPaused,
             activeTaskId = runState.activeTaskId,
             isResponding = overlay.isResponding,
@@ -291,7 +394,12 @@ class ChatViewModel(
             accessibilityState = accState,
             mediaProjectionState = projState,
             isMediaProjectionActive = projState == MediaProjectionConsentState.GRANTED_ACTIVE,
-            lastToolDiagnostic = diagnostic
+            lastToolDiagnostic = diagnostic,
+            isIncognitoConversation = activeIsEphemeral,
+            queuedPromptsCount = extras.queuedCount,
+            queueNotice = extras.queueNotice,
+            biometricWarningBanner = extras.biometricWarning,
+            memorySavedNotice = extras.memorySavedNotice
         )
     }.stateIn(
         scope = viewModelScope,
@@ -343,29 +451,74 @@ class ChatViewModel(
         attachmentNotices.value = emptyList()
     }
 
+    fun dismissQueueNotice() {
+        queueNoticeState.value = null
+    }
+
+    fun dismissBiometricWarning() {
+        biometricWarningState.value = null
+    }
+
+    fun dismissMemorySavedNotice() {
+        memorySavedState.value = null
+    }
+
     fun selectConversation(conversationId: String) {
-        stopResponse()
-        selectedConversationId.value = conversationId
+        viewModelScope.launch {
+            val currentSettings = settingsRepository.settings.first()
+            if (!currentSettings.allowBackgroundTaskQueue) {
+                stopResponse()
+            }
+            selectedConversationId.value = conversationId
+            if (currentSettings.rememberPreferredModelPerThread) {
+                val conv = ephemeralConversations.value.firstOrNull { it.id == conversationId }
+                    ?: chatRepository.getConversationsSnapshot().firstOrNull { it.id == conversationId }
+                val prefProviderId = conv?.preferredProviderId
+                val prefModelId = conv?.preferredModelId
+                if (!prefProviderId.isNullOrBlank() && !prefModelId.isNullOrBlank()) {
+                    AiProviderType.entries.firstOrNull { it.id == prefProviderId }?.let { resolvedType ->
+                        connectionsRepository.setDefaultProvider(resolvedType, prefModelId)
+                    }
+                }
+            }
+        }
     }
 
     fun startNewConversation() {
-        stopResponse()
         viewModelScope.launch {
-            val newId = chatRepository.createConversation("New conversation")
+            val currentSettings = settingsRepository.settings.first()
+            if (!currentSettings.allowBackgroundTaskQueue) {
+                stopResponse()
+            }
+            val newId = createTargetConversation(currentSettings)
             selectedConversationId.value = newId
         }
     }
 
     fun renameConversation(id: String, title: String) {
         viewModelScope.launch {
-            chatRepository.renameConversation(id, title)
+            if (isEphemeralConversation(id)) {
+                val clean = title.trim()
+                if (clean.isNotEmpty()) {
+                    ephemeralConversations.value = ephemeralConversations.value.map {
+                        if (it.id == id) it.copy(title = clean, updatedAtMillis = System.currentTimeMillis()) else it
+                    }
+                }
+            } else {
+                chatRepository.renameConversation(id, title)
+            }
         }
     }
 
     fun deleteConversation(id: String) {
         lastTurnAttachments.remove(id)
         viewModelScope.launch {
-            chatRepository.deleteConversation(id)
+            if (isEphemeralConversation(id)) {
+                ephemeralConversations.value = ephemeralConversations.value.filterNot { it.id == id }
+                ephemeralMessages.value = ephemeralMessages.value - id
+            } else {
+                chatRepository.deleteConversation(id)
+            }
             if (selectedConversationId.value == id) {
                 selectedConversationId.value = null
             }
@@ -375,6 +528,28 @@ class ChatViewModel(
     fun selectDefaultModel(provider: ProviderConfig, modelId: String) {
         viewModelScope.launch {
             connectionsRepository.setDefaultProvider(provider.providerType, modelId)
+            val settings = settingsRepository.settings.first()
+            val activeId = selectedConversationId.value
+            if (settings.rememberPreferredModelPerThread && activeId != null) {
+                if (isEphemeralConversation(activeId)) {
+                    ephemeralConversations.value = ephemeralConversations.value.map {
+                        if (it.id == activeId) {
+                            it.copy(
+                                preferredProviderId = provider.providerType.id,
+                                preferredModelId = modelId
+                            )
+                        } else {
+                            it
+                        }
+                    }
+                } else {
+                    chatRepository.updateConversationPreferredModel(
+                        conversationId = activeId,
+                        providerId = provider.providerType.id,
+                        modelId = modelId
+                    )
+                }
+            }
         }
     }
 
@@ -390,18 +565,113 @@ class ChatViewModel(
         agentRunController.submitApproval(callId, ApprovalDecision.APPROVE)
     }
 
+    fun confirmApprovalWithAuth(
+        activity: Activity?,
+        request: ToolApprovalRequest,
+        onDeviceCredentialIntentRequired: ((Intent) -> Unit)? = null
+    ) {
+        viewModelScope.launch {
+            val settings = settingsRepository.settings.first()
+            val requiresAuth = settings.biometricLockOnApproval && request.riskCategory in setOf(
+                ToolRiskCategory.SENSITIVE,
+                ToolRiskCategory.DESTRUCTIVE,
+                ToolRiskCategory.EXTERNAL_SIDE_EFFECT
+            )
+            if (!requiresAuth) {
+                biometricWarningState.value = null
+                approveToolCall(request.callId)
+                return@launch
+            }
+            val authenticator = approvalAuthenticator
+            if (authenticator == null) {
+                biometricWarningState.value = "Biometric authenticator is unavailable; approval proceeded with notice."
+                approveToolCall(request.callId)
+                return@launch
+            }
+            var credentialIntentDispatched = false
+            val authResult = authenticator.authenticate(
+                activity = activity,
+                title = "Authorize sensitive action",
+                subtitle = request.intentSummary.ifBlank { request.toolName },
+                onDeviceCredentialIntentRequired = { intent ->
+                    credentialIntentDispatched = true
+                    pendingCredentialApprovalCallId = request.callId
+                    onDeviceCredentialIntentRequired?.invoke(intent)
+                }
+            )
+            when (authResult) {
+                is ApprovalAuthResult.Verified -> {
+                    biometricWarningState.value = null
+                    approveToolCall(request.callId)
+                }
+                is ApprovalAuthResult.ProceedWithWarning -> {
+                    biometricWarningState.value = authResult.warningMessage
+                    approveToolCall(request.callId)
+                }
+                is ApprovalAuthResult.Cancelled -> {
+                    if (!credentialIntentDispatched) {
+                        biometricWarningState.value = authResult.reason
+                    }
+                }
+                is ApprovalAuthResult.Failed -> {
+                    biometricWarningState.value = authResult.errorMessage
+                }
+            }
+        }
+    }
+
+    fun completeDeviceCredentialApproval(granted: Boolean) {
+        val callId = pendingCredentialApprovalCallId ?: return
+        pendingCredentialApprovalCallId = null
+        if (granted) {
+            biometricWarningState.value = null
+            approveToolCall(callId)
+        } else {
+            biometricWarningState.value = "Device credential check cancelled. Sensitive action remains paused."
+        }
+    }
+
     fun rejectToolCall(callId: String) {
+        biometricWarningState.value = null
         agentRunController.submitApproval(callId, ApprovalDecision.REJECT)
+    }
+
+    fun continueUnlockWait() {
+        agentRunController.submitUnlockContinue()
+    }
+
+    fun selectAmbiguousApp(selectionId: String, selectedPackageName: String?) {
+        agentRunController.submitAmbiguityChoice(selectionId, selectedPackageName)
     }
 
     fun sendMessage(overridePrompt: String? = null) {
         val text = (overridePrompt ?: draftText.value).trim()
         val currentAttachments = pendingAttachments.value
         if (text.isEmpty() && currentAttachments.isEmpty()) return
-        if (streamingOverlay.value.isResponding) return
 
         val promptToSend = text.ifEmpty {
             "Analyze attached ${currentAttachments.size} item(s): ${currentAttachments.joinToString { it.displayName }}"
+        }
+
+        if (streamingOverlay.value.isResponding || agentRunController.state.value.isRunning) {
+            if (latestSettings.allowBackgroundTaskQueue) {
+                promptQueue.addLast(
+                    QueuedPrompt(
+                        prompt = promptToSend,
+                        attachments = currentAttachments,
+                        conversationId = selectedConversationId.value
+                    )
+                )
+                queuedCountState.value = promptQueue.size
+                queueNoticeState.value = "Prompt queued (${promptQueue.size} waiting) to run next."
+                if (overridePrompt == null) {
+                    draftText.value = ""
+                }
+                pendingAttachments.value = emptyList()
+            } else {
+                queueNoticeState.value = "A task is currently running. Enable Background Task Queue in Settings to queue follow-up prompts."
+            }
+            return
         }
 
         if (overridePrompt == null) {
@@ -409,12 +679,25 @@ class ChatViewModel(
         }
         pendingAttachments.value = emptyList()
         attachmentNotices.value = emptyList()
+        queueNoticeState.value = null
+        stopRequestedByUser = false
 
+        launchPromptTurn(
+            promptToSend = promptToSend,
+            currentAttachments = currentAttachments,
+            requestedConversationId = selectedConversationId.value
+        )
+    }
+
+    private fun launchPromptTurn(
+        promptToSend: String,
+        currentAttachments: List<ComposerAttachment>,
+        requestedConversationId: String?
+    ) {
         responseJob = viewModelScope.launch {
-            val targetConvId = selectedConversationId.value
-                ?: chatRepository.createConversation("New conversation").also {
-                    selectedConversationId.value = it
-                }
+            val currentSettings = settingsRepository.settings.first()
+            val targetConvId = resolveTargetConversationId(requestedConversationId, currentSettings)
+            selectedConversationId.value = targetConvId
 
             if (currentAttachments.isNotEmpty()) {
                 lastTurnAttachments[targetConvId] = currentAttachments
@@ -422,7 +705,7 @@ class ChatViewModel(
                 lastTurnAttachments.remove(targetConvId)
             }
 
-            chatRepository.appendMessage(
+            appendChatMessage(
                 conversationId = targetConvId,
                 role = MessageRole.USER,
                 content = promptToSend,
@@ -440,7 +723,7 @@ class ChatViewModel(
             val modelId = provider?.selectedModelId?.takeIf { it.isNotBlank() }
 
             if (provider == null || modelId == null) {
-                chatRepository.appendMessage(
+                appendChatMessage(
                     conversationId = targetConvId,
                     role = MessageRole.ASSISTANT,
                     content = "",
@@ -451,7 +734,7 @@ class ChatViewModel(
             }
 
             if (provider.credentialInvalidated) {
-                chatRepository.appendMessage(
+                appendChatMessage(
                     conversationId = targetConvId,
                     role = MessageRole.ASSISTANT,
                     content = "",
@@ -464,7 +747,7 @@ class ChatViewModel(
             }
 
             if (!provider.hasApiKey && !provider.providerType.requiresBaseUrl) {
-                chatRepository.appendMessage(
+                appendChatMessage(
                     conversationId = targetConvId,
                     role = MessageRole.ASSISTANT,
                     content = "",
@@ -506,10 +789,11 @@ class ChatViewModel(
         if (failedOrStoppedMessage.role != MessageRole.ASSISTANT) return
 
         attachmentNotices.value = emptyList()
+        stopRequestedByUser = false
 
         responseJob = viewModelScope.launch {
             val targetConvId = failedOrStoppedMessage.conversationId
-            chatRepository.deleteMessage(failedOrStoppedMessage.id)
+            deleteChatMessage(targetConvId, failedOrStoppedMessage.id)
 
             val provider = connectionsRepository.defaultProvider.first()
                 ?: connectionsRepository.providers.first().firstOrNull {
@@ -523,7 +807,7 @@ class ChatViewModel(
                 provider.credentialInvalidated ||
                 (!provider.hasApiKey && !provider.providerType.requiresBaseUrl)
             ) {
-                chatRepository.appendMessage(
+                appendChatMessage(
                     conversationId = targetConvId,
                     role = MessageRole.ASSISTANT,
                     content = "",
@@ -549,7 +833,7 @@ class ChatViewModel(
                 emptyList()
             }
 
-            val latestPrompt = chatRepository.getMessagesSnapshot(targetConvId)
+            val latestPrompt = getChatHistorySnapshot(targetConvId)
                 .lastOrNull { it.role == MessageRole.USER }?.content ?: "Retry prompt"
 
             runAgentTurn(
@@ -563,6 +847,9 @@ class ChatViewModel(
     }
 
     fun stopResponse() {
+        stopRequestedByUser = true
+        promptQueue.clear()
+        queuedCountState.value = 0
         agentRunController.cancelActiveRun()
         if (responseJob?.isActive == true) {
             responseJob?.cancel()
@@ -579,6 +866,11 @@ class ChatViewModel(
         connectionsRepository.refreshCapabilities()
         val settings = settingsRepository.settings.first()
         val capabilities = connectionsRepository.capabilities.first()
+        val memories = if (settings.localMemoryEnabled) {
+            memoryRepository?.getSnapshot().orEmpty()
+        } else {
+            emptyList()
+        }
         val registeredTools = toolRegistry.getAllRegisteredTools(capabilities)
         val allImplementedTools = registeredTools.filter { it.isAvailable }.map { it.definition }
         val availableTools = if (provider.effectiveSupportsTools) allImplementedTools else emptyList()
@@ -587,7 +879,8 @@ class ChatViewModel(
             availableTools = allImplementedTools,
             toolsEnabledForModel = provider.effectiveSupportsTools,
             capabilities = capabilities,
-            registeredTools = registeredTools
+            registeredTools = registeredTools,
+            memoryEntries = memories
         )
         lastToolDiagnosticState.value = ToolDispatchDiagnostic(
             providerType = provider.providerType,
@@ -597,9 +890,9 @@ class ChatViewModel(
             serializedToolNames = availableTools.map { it.name },
             toolChoiceSent = if (provider.effectiveSupportsTools && availableTools.isNotEmpty()) "auto" else "none"
         )
-        val historySnapshot = chatRepository.getMessagesSnapshot(conversationId)
+        val historySnapshot = getChatHistorySnapshot(conversationId)
 
-        var currentAssistantId = chatRepository.appendMessage(
+        var currentAssistantId = appendChatMessage(
             conversationId = conversationId,
             role = MessageRole.ASSISTANT,
             content = "",
@@ -622,6 +915,7 @@ class ChatViewModel(
 
         val job = currentCoroutineContext()[Job]
         val control = agentRunController.beginRun(taskId, conversationId, job)
+        floatingIndicatorController?.setCurrentObjective(userPrompt)
         var liveTaskCreated = false
         var latestPlan: ExecutionPlan? = null
         var latestText = ""
@@ -649,7 +943,7 @@ class ChatViewModel(
                         val now = System.currentTimeMillis()
                         if (latestText.isNotEmpty() && now - lastPersistedAt > 500L) {
                             lastPersistedAt = now
-                            chatRepository.finalizeMessage(
+                            finalizeChatMessage(
                                 messageId = currentAssistantId,
                                 conversationId = conversationId,
                                 content = latestText,
@@ -722,12 +1016,82 @@ class ChatViewModel(
                         }
                     }
 
+                    is AgentEvent.WaitingForUserUnlock -> {
+                        liveTaskCreated = true
+                        taskNotificationManager?.showWaitingForUnlock(
+                            taskId = taskId,
+                            title = event.request.title,
+                            message = event.request.message,
+                            showContinueAction = event.request.manualContinueRequired
+                        )
+                        taskRepository?.upsertLiveTask(
+                            taskId = taskId,
+                            title = userPrompt.take(64),
+                            prompt = userPrompt,
+                            status = AgentTaskStatus.WAITING_FOR_USER_UNLOCK,
+                            providerLabel = provider.providerType.displayName,
+                            modelLabel = modelId,
+                            requiredCapabilities = usedToolNames.toList(),
+                            steps = latestPlan?.steps.orEmpty(),
+                            createdAtMillis = taskCreatedAt,
+                            targetApp = event.request.targetAppName,
+                            resumableSnapshot = ResumableTaskSnapshot(
+                                taskId = taskId,
+                                conversationId = conversationId,
+                                prompt = userPrompt,
+                                targetAppName = event.request.targetAppName,
+                                targetPackage = event.request.targetPackage,
+                                reason = event.request.message
+                            )
+                        )
+                    }
+
+                    is AgentEvent.UserUnlockTimeoutManualContinue -> {
+                        liveTaskCreated = true
+                        taskNotificationManager?.showWaitingForUnlock(
+                            taskId = taskId,
+                            title = "Unlock ${event.targetAppName}",
+                            message = event.reason,
+                            showContinueAction = true
+                        )
+                        taskRepository?.upsertLiveTask(
+                            taskId = taskId,
+                            title = userPrompt.take(64),
+                            prompt = userPrompt,
+                            status = AgentTaskStatus.WAITING_FOR_USER_UNLOCK,
+                            providerLabel = provider.providerType.displayName,
+                            modelLabel = modelId,
+                            requiredCapabilities = usedToolNames.toList(),
+                            steps = latestPlan?.steps.orEmpty(),
+                            createdAtMillis = taskCreatedAt,
+                            targetApp = event.targetAppName,
+                            resumableSnapshot = ResumableTaskSnapshot(
+                                taskId = taskId,
+                                conversationId = conversationId,
+                                prompt = userPrompt,
+                                targetAppName = event.targetAppName,
+                                targetPackage = event.targetPackage,
+                                reason = event.reason
+                            )
+                        )
+                    }
+
+                    is AgentEvent.AmbiguityChoiceRequired -> {
+                        liveTaskCreated = true
+                        taskNotificationManager?.showRunningProgress(
+                            taskId = taskId,
+                            title = userPrompt,
+                            detail = event.request.reason
+                        )
+                    }
+
                     is AgentEvent.PlanUpdated -> {
                         latestPlan = event.plan
                         if (liveTaskCreated) {
                             val runStateNow = agentRunController.state.value
                             val taskStatus = when {
                                 runStateNow.isPaused -> AgentTaskStatus.PAUSED
+                                runStateNow.waitingForUnlock != null -> AgentTaskStatus.WAITING_FOR_USER_UNLOCK
                                 runStateNow.pendingApproval != null -> AgentTaskStatus.AWAITING_APPROVAL
                                 else -> AgentTaskStatus.RUNNING
                             }
@@ -741,16 +1105,17 @@ class ChatViewModel(
                                 requiredCapabilities = usedToolNames.toList(),
                                 steps = event.plan.steps,
                                 verificationSummary = event.plan.verificationSummary,
-                                createdAtMillis = taskCreatedAt
+                                createdAtMillis = taskCreatedAt,
+                                targetApp = runStateNow.currentTargetAppName
                             )
                         }
                     }
 
                     is AgentEvent.IntermediateMessagesProduced -> {
-                        // Replace temporary streaming bubble so chronological order in Room stays:
+                        // Replace temporary streaming bubble so chronological order stays:
                         // USER -> ASSISTANT(toolCalls) -> TOOL(results) -> ASSISTANT(final)
-                        chatRepository.deleteMessage(currentAssistantId)
-                        chatRepository.appendMessage(
+                        deleteChatMessage(conversationId, currentAssistantId)
+                        appendChatMessage(
                             conversationId = conversationId,
                             role = MessageRole.ASSISTANT,
                             content = event.assistantText,
@@ -762,7 +1127,7 @@ class ChatViewModel(
                         event.toolResults.forEach { res ->
                             val toolJson = res.outputJson
                                 ?: JSONObject().put("error", res.errorMessage ?: res.displaySummary).toString()
-                            chatRepository.appendMessage(
+                            appendChatMessage(
                                 conversationId = conversationId,
                                 role = MessageRole.TOOL,
                                 content = toolJson,
@@ -772,7 +1137,7 @@ class ChatViewModel(
                             )
                         }
                         latestText = ""
-                        currentAssistantId = chatRepository.appendMessage(
+                        currentAssistantId = appendChatMessage(
                             conversationId = conversationId,
                             role = MessageRole.ASSISTANT,
                             content = "",
@@ -788,27 +1153,35 @@ class ChatViewModel(
                     }
 
                     is AgentEvent.Completed -> {
+                        val terminalStatus = if (event.partiallyCompleted) {
+                            AgentTaskStatus.PARTIALLY_COMPLETED
+                        } else {
+                            AgentTaskStatus.COMPLETED
+                        }
                         if (liveTaskCreated) {
                             taskNotificationManager?.showTerminalOutcome(
                                 title = userPrompt,
-                                detail = event.verification.summaryNote.ifBlank { "Task completed." },
-                                isError = false
+                                detail = event.verification.summaryNote.ifBlank {
+                                    if (event.partiallyCompleted) "Partially completed." else "Task completed."
+                                },
+                                isError = event.partiallyCompleted
                             )
                             taskRepository?.upsertLiveTask(
                                 taskId = taskId,
                                 title = userPrompt.take(64),
                                 prompt = userPrompt,
-                                status = AgentTaskStatus.COMPLETED,
+                                status = terminalStatus,
                                 providerLabel = provider.providerType.displayName,
                                 modelLabel = modelId,
                                 requiredCapabilities = usedToolNames.toList(),
                                 steps = event.plan?.steps ?: latestPlan?.steps.orEmpty(),
                                 summaryMessage = event.finalText.take(280),
                                 verificationSummary = event.verification,
-                                createdAtMillis = taskCreatedAt
+                                createdAtMillis = taskCreatedAt,
+                                targetApp = agentRunController.state.value.currentTargetAppName
                             )
                         }
-                        chatRepository.finalizeMessage(
+                        finalizeChatMessage(
                             messageId = currentAssistantId,
                             conversationId = conversationId,
                             content = event.finalText,
@@ -844,7 +1217,7 @@ class ChatViewModel(
                                 createdAtMillis = taskCreatedAt
                             )
                         }
-                        chatRepository.finalizeMessage(
+                        finalizeChatMessage(
                             messageId = currentAssistantId,
                             conversationId = conversationId,
                             content = event.partialText,
@@ -880,7 +1253,7 @@ class ChatViewModel(
                                 createdAtMillis = taskCreatedAt
                             )
                         }
-                        chatRepository.finalizeMessage(
+                        finalizeChatMessage(
                             messageId = currentAssistantId,
                             conversationId = conversationId,
                             content = event.partialText,
@@ -906,6 +1279,11 @@ class ChatViewModel(
                     }
 
                     is AgentEvent.ToolCompleted -> {
+                        if (event.result.toolName == "save_memory_note" &&
+                            event.result.status == ToolExecutionStatus.SUCCEEDED
+                        ) {
+                            memorySavedState.value = event.result.displaySummary
+                        }
                         if (liveTaskCreated) {
                             taskNotificationManager?.showRunningProgress(
                                 taskId = taskId,
@@ -969,7 +1347,7 @@ class ChatViewModel(
                         createdAtMillis = taskCreatedAt
                     )
                 }
-                chatRepository.finalizeMessage(
+                finalizeChatMessage(
                     messageId = currentAssistantId,
                     conversationId = conversationId,
                     content = latestText,
@@ -987,6 +1365,201 @@ class ChatViewModel(
                 streamingOverlay.value = StreamingOverlay()
                 agentRunController.finishRun()
             }
+            if (!stopRequestedByUser && promptQueue.isNotEmpty()) {
+                val nextPrompt = promptQueue.removeFirst()
+                queuedCountState.value = promptQueue.size
+                if (promptQueue.isEmpty()) {
+                    queueNoticeState.value = null
+                }
+                launchPromptTurn(
+                    promptToSend = nextPrompt.prompt,
+                    currentAttachments = nextPrompt.attachments,
+                    requestedConversationId = nextPrompt.conversationId ?: conversationId
+                )
+            }
+        }
+    }
+
+    private fun isEphemeralConversation(conversationId: String): Boolean =
+        ephemeralConversations.value.any { it.id == conversationId }
+
+    private suspend fun createTargetConversation(settings: AppSettings): String {
+        return if (settings.saveConversationHistory) {
+            chatRepository.createConversation("New conversation")
+        } else {
+            val now = System.currentTimeMillis()
+            val id = "incognito_${UUID.randomUUID()}"
+            val conv = Conversation(
+                id = id,
+                title = "Temporary chat",
+                isSamplePreview = false,
+                createdAtMillis = now,
+                updatedAtMillis = now,
+                lastMessagePreview = "Not saving history"
+            )
+            ephemeralConversations.value = listOf(conv) + ephemeralConversations.value
+            ephemeralMessages.value = ephemeralMessages.value + (id to emptyList())
+            id
+        }
+    }
+
+    private suspend fun resolveTargetConversationId(
+        requestedId: String?,
+        settings: AppSettings
+    ): String {
+        return if (settings.saveConversationHistory) {
+            if (requestedId != null && !isEphemeralConversation(requestedId)) {
+                requestedId
+            } else {
+                chatRepository.createConversation("New conversation")
+            }
+        } else {
+            if (requestedId != null && isEphemeralConversation(requestedId)) {
+                requestedId
+            } else {
+                createTargetConversation(settings)
+            }
+        }
+    }
+
+    private suspend fun getChatHistorySnapshot(conversationId: String): List<ChatMessage> {
+        return ephemeralMessages.value[conversationId] ?: chatRepository.getMessagesSnapshot(conversationId)
+    }
+
+    private suspend fun appendChatMessage(
+        conversationId: String,
+        role: MessageRole,
+        content: String,
+        status: MessageStatus = MessageStatus.COMPLETE,
+        errorMessage: String? = null,
+        providerLabel: String? = null,
+        modelLabel: String? = null,
+        tokenUsage: TokenUsage? = null,
+        executionPlan: ExecutionPlan? = null,
+        taskSummary: TaskSummary? = null,
+        attachments: List<String> = emptyList(),
+        toolCalls: List<ToolCall> = emptyList(),
+        toolCallId: String? = null,
+        toolName: String? = null,
+        verificationSummary: TaskVerificationSummary? = null
+    ): String {
+        if (!isEphemeralConversation(conversationId)) {
+            return chatRepository.appendMessage(
+                conversationId = conversationId,
+                role = role,
+                content = content,
+                status = status,
+                errorMessage = errorMessage,
+                providerLabel = providerLabel,
+                modelLabel = modelLabel,
+                tokenUsage = tokenUsage,
+                executionPlan = executionPlan,
+                taskSummary = taskSummary,
+                attachments = attachments,
+                toolCalls = toolCalls,
+                toolCallId = toolCallId,
+                toolName = toolName,
+                verificationSummary = verificationSummary
+            )
+        }
+        val msgId = "eph_msg_${UUID.randomUUID()}"
+        val now = System.currentTimeMillis()
+        val msg = ChatMessage(
+            id = msgId,
+            conversationId = conversationId,
+            role = role,
+            content = content,
+            createdAtMillis = now,
+            status = status,
+            errorMessage = errorMessage,
+            providerLabel = providerLabel,
+            modelLabel = modelLabel,
+            tokenUsage = tokenUsage,
+            executionPlan = executionPlan,
+            taskSummary = taskSummary,
+            attachments = attachments,
+            isPreviewMessage = false,
+            toolCalls = toolCalls,
+            toolCallId = toolCallId,
+            toolName = toolName,
+            verificationSummary = verificationSummary
+        )
+        val existingList = ephemeralMessages.value[conversationId].orEmpty()
+        ephemeralMessages.value = ephemeralMessages.value + (conversationId to (existingList + msg))
+        ephemeralConversations.value = ephemeralConversations.value.map { conv ->
+            if (conv.id == conversationId) {
+                val updatedTitle = if (conv.title == "Temporary chat" && role == MessageRole.USER) {
+                    content.trim().take(42).ifBlank { "Temporary chat" }
+                } else {
+                    conv.title
+                }
+                val preview = content.lineSequence().firstOrNull { it.isNotBlank() }?.take(80)
+                    ?: errorMessage?.take(80)
+                    ?: conv.lastMessagePreview
+                conv.copy(title = updatedTitle, updatedAtMillis = now, lastMessagePreview = preview)
+            } else {
+                conv
+            }
+        }
+        return msgId
+    }
+
+    private suspend fun finalizeChatMessage(
+        messageId: String,
+        conversationId: String,
+        content: String,
+        status: MessageStatus,
+        errorMessage: String? = null,
+        providerLabel: String? = null,
+        modelLabel: String? = null,
+        tokenUsage: TokenUsage? = null,
+        executionPlan: ExecutionPlan? = null,
+        taskSummary: TaskSummary? = null,
+        verificationSummary: TaskVerificationSummary? = null
+    ) {
+        if (!isEphemeralConversation(conversationId)) {
+            chatRepository.finalizeMessage(
+                messageId = messageId,
+                conversationId = conversationId,
+                content = content,
+                status = status,
+                errorMessage = errorMessage,
+                providerLabel = providerLabel,
+                modelLabel = modelLabel,
+                tokenUsage = tokenUsage,
+                executionPlan = executionPlan,
+                taskSummary = taskSummary,
+                verificationSummary = verificationSummary
+            )
+            return
+        }
+        val list = ephemeralMessages.value[conversationId].orEmpty()
+        val updated = list.map { existing ->
+            if (existing.id == messageId) {
+                existing.copy(
+                    content = content,
+                    status = status,
+                    errorMessage = errorMessage,
+                    providerLabel = providerLabel ?: existing.providerLabel,
+                    modelLabel = modelLabel ?: existing.modelLabel,
+                    tokenUsage = tokenUsage ?: existing.tokenUsage,
+                    executionPlan = executionPlan ?: existing.executionPlan,
+                    taskSummary = taskSummary ?: existing.taskSummary,
+                    verificationSummary = verificationSummary ?: existing.verificationSummary
+                )
+            } else {
+                existing
+            }
+        }
+        ephemeralMessages.value = ephemeralMessages.value + (conversationId to updated)
+    }
+
+    private suspend fun deleteChatMessage(conversationId: String, messageId: String) {
+        if (!isEphemeralConversation(conversationId)) {
+            chatRepository.deleteMessage(messageId)
+        } else {
+            val list = ephemeralMessages.value[conversationId].orEmpty()
+            ephemeralMessages.value = ephemeralMessages.value + (conversationId to list.filterNot { it.id == messageId })
         }
     }
 
@@ -1003,7 +1576,10 @@ class ChatViewModel(
         private val agentRunController: AgentRunController = AgentRunController(),
         private val permissionManager: AndroidPermissionManager? = null,
         private val taskNotificationManager: NexaTaskNotificationManager? = null,
-        private val mediaProjectionSessionManager: MediaProjectionSessionManager? = null
+        private val mediaProjectionSessionManager: MediaProjectionSessionManager? = null,
+        private val floatingIndicatorController: FloatingIndicatorController? = null,
+        private val memoryRepository: MemoryRepository? = null,
+        private val approvalAuthenticator: ApprovalAuthenticator? = null
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -1020,7 +1596,10 @@ class ChatViewModel(
                 agentRunController = agentRunController,
                 permissionManager = permissionManager,
                 taskNotificationManager = taskNotificationManager,
-                mediaProjectionSessionManager = mediaProjectionSessionManager
+                mediaProjectionSessionManager = mediaProjectionSessionManager,
+                floatingIndicatorController = floatingIndicatorController,
+                memoryRepository = memoryRepository,
+                approvalAuthenticator = approvalAuthenticator
             ) as T
         }
     }

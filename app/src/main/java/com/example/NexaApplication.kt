@@ -10,14 +10,19 @@ import com.example.android.app.AndroidAppDiscovery
 import com.example.android.app.AndroidAppLauncher
 import com.example.android.media.MediaProjectionSessionManager
 import com.example.android.notifications.NexaTaskNotificationManager
+import com.example.android.overlay.FloatingIndicatorController
 import com.example.android.runtime.AndroidActionRuntime
 import com.example.android.runtime.AndroidActionVerifier
 import com.example.android.runtime.AndroidPermissionManager
+import com.example.android.security.AndroidApprovalAuthenticator
+import com.example.android.security.ApprovalAuthenticator
+import com.example.data.local.LocalMemoryStore
 import com.example.data.local.NexaDatabase
 import com.example.data.local.NexaPreferencesDataStore
 import com.example.data.local.NexaTypeConverters
 import com.example.data.repository.ChatRepository
 import com.example.data.repository.ConnectionsRepository
+import com.example.data.repository.MemoryRepository
 import com.example.data.repository.SettingsRepository
 import com.example.data.repository.TaskRepository
 import com.example.domain.agent.AgentOrchestrator
@@ -45,6 +50,7 @@ import com.example.domain.security.CredentialCipher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class AppContainer(application: Application) {
@@ -52,6 +58,10 @@ class AppContainer(application: Application) {
     private val database: NexaDatabase = NexaDatabase.build(application)
     private val credentialCipher: CredentialCipher = AndroidKeyStoreCredentialCipher()
     private val preferencesDataStore = NexaPreferencesDataStore(application, credentialCipher)
+    private val localMemoryStore = LocalMemoryStore(preferencesDataStore)
+
+    @Volatile
+    private var latestLocalMemoryEnabled: Boolean = false
 
     private val networkChecker = AndroidNetworkAvailabilityChecker(application)
     val nexaHttpClient: NexaHttpClient = NexaHttpClient(networkChecker = networkChecker)
@@ -83,6 +93,7 @@ class AppContainer(application: Application) {
         backend = LiveAccessibilityInteractionBackend(application, nodeInspector)
     )
     val androidActionRuntime: AndroidActionRuntime = AndroidActionRuntime(
+        context = application,
         permissionManager = permissionManager,
         appDiscovery = appDiscovery,
         appLauncher = appLauncher,
@@ -101,9 +112,15 @@ class AppContainer(application: Application) {
         permissionManager = permissionManager,
         appDiscovery = appDiscovery
     )
+    val memoryRepository: MemoryRepository = MemoryRepository(localMemoryStore)
+    val approvalAuthenticator: ApprovalAuthenticator = AndroidApprovalAuthenticator(application)
+    val settingsRepository: SettingsRepository = SettingsRepository(preferencesDataStore)
+
     val toolRegistry: ToolRegistry = DefaultToolRegistry(
         context = application,
-        actionRuntime = androidActionRuntime
+        actionRuntime = androidActionRuntime,
+        memoryRepository = memoryRepository,
+        localMemoryEnabledProvider = { latestLocalMemoryEnabled }
     )
     val safetyPolicyManager: SafetyPolicyManager = DefaultSafetyPolicyManager()
     val chatRepository: ChatRepository = ChatRepository(database.conversationDao(), converters)
@@ -114,7 +131,6 @@ class AppContainer(application: Application) {
         capabilityInspector = capabilityInspector,
         mediaProjectionSessionManager = mediaProjectionSessionManager
     )
-    val settingsRepository: SettingsRepository = SettingsRepository(preferencesDataStore)
 
     val toolExecutionRuntime: ToolExecutionRuntime = ToolExecutionRuntime(
         toolRegistry = toolRegistry,
@@ -124,6 +140,14 @@ class AppContainer(application: Application) {
     val executionRuntime: ExecutionRuntime = toolExecutionRuntime
     val agentOrchestrator: AgentOrchestrator = Phase1AgentOrchestrator(toolRegistry, safetyPolicyManager)
     val agentRunController: AgentRunController = AgentRunController()
+
+    val floatingIndicatorController: FloatingIndicatorController = FloatingIndicatorController(
+        context = application,
+        agentRunController = agentRunController,
+        settingsFlow = settingsRepository.settings,
+        taskNotificationManager = taskNotificationManager,
+        overlayPermissionProvider = { permissionManager.canDrawOverlays() }
+    )
 
     val autonomousAgentOrchestrator: AutonomousAgentOrchestrator = DefaultAutonomousAgentOrchestrator(
         connectionsRepository = connectionsRepository,
@@ -135,6 +159,17 @@ class AppContainer(application: Application) {
 
     suspend fun ensureSeeded() {
         database.initializePhase2DataIfNeeded(converters)
+        val initialSettings = settingsRepository.settings.first()
+        latestLocalMemoryEnabled = initialSettings.localMemoryEnabled
+        chatRepository.pruneExpiredConversations(retentionDays = initialSettings.historyRetentionDays)
+    }
+
+    fun observeRuntimeFlags(scope: CoroutineScope) {
+        scope.launch {
+            settingsRepository.settings.collect { latest ->
+                latestLocalMemoryEnabled = latest.localMemoryEnabled
+            }
+        }
     }
 }
 
@@ -147,6 +182,7 @@ class NexaApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
+        container.observeRuntimeFlags(appScope)
         appScope.launch {
             container.ensureSeeded()
         }

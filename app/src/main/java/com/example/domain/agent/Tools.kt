@@ -310,3 +310,75 @@ class DeviceInfoTool(
         }
     }
 }
+
+class SaveMemoryNoteTool(
+    private val onSaveMemory: suspend (note: String, category: String) -> com.example.domain.model.MemoryEntry,
+    private val isMemoryEnabled: () -> Boolean = { true }
+) : ExecutableTool {
+    override val requiredCapability: DeviceCapabilityType? = null
+
+    override val definition: ToolDefinition = ToolDefinition(
+        id = "memory.save_note",
+        name = "save_memory_note",
+        description = "Persist an explicit user preference, habit, or fact to on-device local memory when On-Device Context Memory is enabled.",
+        parameters = listOf(
+            ToolParameter(
+                name = "note",
+                type = ToolParameterType.STRING,
+                description = "Concise factual preference or context note to remember locally (e.g. 'User prefers concise Kotlin snippets').",
+                required = true
+            ),
+            ToolParameter(
+                name = "category",
+                type = ToolParameterType.STRING,
+                description = "Optional short category such as 'Preference', 'Workflow', or 'Device'.",
+                required = false
+            )
+        ),
+        riskCategory = ToolRiskCategory.READ_ONLY,
+        resultSchemaDescription = "JSON object with saved (boolean), id, note, category, createdAtMillis.",
+        timeoutMillis = 5_000L,
+        isImplemented = true
+    )
+
+    override fun validateArguments(args: JSONObject): String? {
+        if (!isMemoryEnabled()) {
+            return "On-device context memory is disabled in Settings > Memory Settings."
+        }
+        val note = args.opt("note")
+        if (note !is String || note.isBlank()) {
+            return "Parameter 'note' must be a non-empty string."
+        }
+        return null
+    }
+
+    override fun describeAction(args: JSONObject): String {
+        val note = args.optString("note").trim().take(80)
+        return if (note.isBlank()) "Save note to on-device memory" else "Save memory note: $note"
+    }
+
+    override suspend fun execute(args: JSONObject): ToolExecutionOutput {
+        if (!isMemoryEnabled()) {
+            val err = "On-device context memory is currently disabled in Settings."
+            return ToolExecutionOutput(
+                outputJson = JSONObject().put("saved", false).put("error", err).toString().let { JSONObject(it) },
+                displaySummary = err,
+                isError = true,
+                errorMessage = err
+            )
+        }
+        val note = args.getString("note").trim()
+        val category = args.optString("category").trim().ifBlank { "Preference" }
+        val saved = onSaveMemory(note, category)
+        val out = JSONObject()
+            .put("saved", true)
+            .put("id", saved.id)
+            .put("note", saved.text)
+            .put("category", saved.category)
+            .put("createdAtMillis", saved.createdAtMillis)
+        return ToolExecutionOutput(
+            outputJson = out,
+            displaySummary = "Saved memory note (${saved.category}): ${saved.text.take(64)}"
+        )
+    }
+}

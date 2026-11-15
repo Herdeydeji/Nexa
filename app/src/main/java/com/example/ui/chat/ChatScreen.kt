@@ -1,6 +1,8 @@
 package com.example.ui.chat
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -8,8 +10,6 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -41,10 +41,14 @@ import androidx.compose.material.icons.outlined.AddComment
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Screenshot
 import androidx.compose.material.icons.outlined.SettingsEthernet
 import androidx.compose.material.icons.outlined.StopCircle
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -71,6 +75,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.domain.agent.RegisteredToolEntry
@@ -85,6 +91,8 @@ import com.example.domain.model.MediaProjectionConsentState
 import com.example.domain.model.MessageRole
 import com.example.domain.model.MessageStatus
 import com.example.domain.model.ProviderConfig
+import com.example.ui.components.AmbiguitySelectionCard
+import com.example.ui.components.ApprovalGateCard
 import com.example.ui.components.ExpandableAgentExecutionPanel
 import com.example.ui.components.MarkdownTextContent
 import com.example.ui.components.NexaBrandMark
@@ -92,27 +100,9 @@ import com.example.ui.components.NoticeBanner
 import com.example.ui.components.SampleDataBadge
 import com.example.ui.components.StatusPill
 import com.example.ui.components.TaskSummaryCard
-import com.example.ui.theme.NexaBackground
-import com.example.ui.theme.NexaBorder
-import com.example.ui.theme.NexaBorderSubtle
-import com.example.ui.theme.NexaElevatedSurface
-import com.example.ui.theme.NexaError
-import com.example.ui.theme.NexaErrorContainer
-import com.example.ui.theme.NexaInfo
-import com.example.ui.theme.NexaInfoContainer
-import com.example.ui.theme.NexaNeutral
-import com.example.ui.theme.NexaNeutralContainer
-import com.example.ui.theme.NexaOnOrange
-import com.example.ui.theme.NexaOrange
-import com.example.ui.theme.NexaOrangeMuted
-import com.example.ui.theme.NexaSecondaryBackground
-import com.example.ui.theme.NexaSuccess
-import com.example.ui.theme.NexaSuccessContainer
-import com.example.ui.theme.NexaTextPrimary
-import com.example.ui.theme.NexaTextSecondary
-import com.example.ui.theme.NexaTextTertiary
-import com.example.ui.theme.NexaWarning
-import com.example.ui.theme.NexaWarningContainer
+import com.example.ui.components.UnlockWaitCard
+import com.example.ui.theme.LocalNexaHapticFeedback
+import com.example.ui.theme.NexaTheme
 
 @Composable
 fun ChatScreen(
@@ -123,6 +113,8 @@ fun ChatScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val colors = NexaTheme.colors
+    val haptic = LocalNexaHapticFeedback.current
     val listState = rememberLazyListState()
 
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
@@ -159,6 +151,12 @@ fun ChatScreen(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
         viewModel.onMediaProjectionConsentResult(result.resultCode, result.data)
+    }
+
+    val deviceCredentialLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        viewModel.completeDeviceCredentialApproval(result.resultCode == Activity.RESULT_OK)
     }
 
     val onOpenAccessibilitySettings = remember(context) {
@@ -209,7 +207,7 @@ fun ChatScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(NexaBackground)
+            .background(colors.background)
     ) {
         ChatTopHeader(
             modelLabel = state.defaultProvider?.let { prov ->
@@ -217,10 +215,111 @@ fun ChatScreen(
                 "${prov.providerType.displayName} · $modelShort"
             } ?: stringResource(R.string.chat_no_active_model),
             agentStatus = state.agentStatus,
-            onModelClick = { showModelSheet = true },
-            onNewChatClick = { viewModel.startNewConversation() },
-            onHistoryClick = { showHistorySheet = true }
+            onModelClick = {
+                haptic.performPrimary()
+                showModelSheet = true
+            },
+            onNewChatClick = {
+                haptic.performPrimary()
+                viewModel.startNewConversation()
+            },
+            onHistoryClick = {
+                haptic.performPrimary()
+                showHistorySheet = true
+            }
         )
+
+        if (state.isIncognitoConversation) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(colors.elevatedSurface)
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                    .testTag("chat_incognito_badge"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.VisibilityOff,
+                    contentDescription = null,
+                    tint = colors.warning,
+                    modifier = Modifier.size(15.dp)
+                )
+                Text(
+                    text = "Temporary mode · Not saving history",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.warning
+                )
+            }
+        }
+
+        state.memorySavedNotice?.let { savedNote ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                    .testTag("chat_memory_saved_badge"),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                NoticeBanner(
+                    icon = Icons.Outlined.Psychology,
+                    text = savedNote,
+                    accentColor = colors.success,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(onClick = viewModel::dismissMemorySavedNotice) {
+                    Text("Dismiss", color = colors.textSecondary)
+                }
+            }
+        }
+
+        state.biometricWarningBanner?.let { bioWarning ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                    .testTag("chat_biometric_warning_banner"),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                NoticeBanner(
+                    icon = Icons.Outlined.Lock,
+                    text = bioWarning,
+                    accentColor = colors.warning,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(onClick = viewModel::dismissBiometricWarning) {
+                    Text("Dismiss", color = colors.textSecondary)
+                }
+            }
+        }
+
+        if (state.queuedPromptsCount > 0 || !state.queueNotice.isNullOrBlank()) {
+            val queueText = buildString {
+                if (state.queuedPromptsCount > 0) {
+                    append("Queued: ${state.queuedPromptsCount}. ")
+                }
+                state.queueNotice?.let { append(it) }
+            }.trim()
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                    .testTag("chat_queue_banner"),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                NoticeBanner(
+                    icon = Icons.Outlined.Schedule,
+                    text = queueText,
+                    accentColor = colors.info,
+                    modifier = Modifier.weight(1f)
+                )
+                if (state.queuedPromptsCount == 0) {
+                    TextButton(onClick = viewModel::dismissQueueNotice) {
+                        Text("Dismiss", color = colors.textSecondary)
+                    }
+                }
+            }
+        }
 
         Box(
             modifier = Modifier
@@ -234,7 +333,11 @@ fun ChatScreen(
                     registeredTools = state.registeredTools,
                     accessibilityState = state.accessibilityState,
                     mediaProjectionState = state.mediaProjectionState,
-                    onPromptSelect = { prompt -> viewModel.sendMessage(prompt) },
+                    allowAppLaunchSuggestions = state.settings.allowAppLaunchSuggestions,
+                    onPromptSelect = { prompt ->
+                        haptic.performConfirm()
+                        viewModel.sendMessage(prompt)
+                    },
                     onConfigureProvider = onNavigateToConnections,
                     onOpenAccessibilitySettings = onOpenAccessibilitySettings,
                     onRequestScreenCapture = onRequestScreenCapture,
@@ -249,15 +352,16 @@ fun ChatScreen(
                         .testTag("chat_message_list"),
                     contentPadding = PaddingValues(
                         horizontal = 16.dp,
-                        vertical = if (state.settings.compactMessageSpacing) 10.dp else 16.dp
+                        vertical = if (state.settings.compactMessageSpacing) 8.dp else 16.dp
                     ),
                     verticalArrangement = Arrangement.spacedBy(
-                        if (state.settings.compactMessageSpacing) 12.dp else 18.dp
+                        if (state.settings.compactMessageSpacing) 8.dp else 18.dp
                     )
                 ) {
                     items(state.messages, key = { it.id }) { message ->
                         ChatMessageRow(
                             message = message,
+                            compactSpacing = state.settings.compactMessageSpacing,
                             autoExpandPlan = state.settings.autoExpandExecutionPanel,
                             showSampleBadges = state.settings.showSampleBadges,
                             showCodeLineNumbers = state.settings.showCodeLineNumbers,
@@ -266,7 +370,10 @@ fun ChatScreen(
                             isMediaProjectionActive = state.isMediaProjectionActive,
                             mediaProjectionState = state.mediaProjectionState,
                             onOpenTaskDetail = onOpenTaskDetail,
-                            onRetry = { viewModel.retryMessage(message) },
+                            onRetry = {
+                                haptic.performConfirm()
+                                viewModel.retryMessage(message)
+                            },
                             onOpenConnections = onNavigateToConnections,
                             onOpenAccessibilitySettings = onOpenAccessibilitySettings,
                             onRequestScreenCapture = onRequestScreenCapture
@@ -278,7 +385,7 @@ fun ChatScreen(
 
         if (state.isResponding) {
             Surface(
-                color = NexaSecondaryBackground,
+                color = colors.secondaryBackground,
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag("chat_live_execution_bar")
@@ -294,13 +401,17 @@ fun ChatScreen(
                         Text(
                             text = state.runStatus.label,
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (state.isPaused) NexaInfo else NexaOrange
+                            color = when {
+                                state.waitingForUnlock != null -> colors.warning
+                                state.isPaused -> colors.info
+                                else -> colors.orange
+                            }
                         )
                         if (state.statusDetail.isNotBlank()) {
                             Text(
                                 text = state.statusDetail,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = NexaTextSecondary,
+                                color = colors.textSecondary,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
@@ -309,6 +420,7 @@ fun ChatScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         OutlinedButton(
                             onClick = {
+                                haptic.performPrimary()
                                 if (state.isPaused) viewModel.resumeExecution() else viewModel.pauseExecution()
                             },
                             modifier = Modifier.testTag("chat_pause_resume_button")
@@ -316,21 +428,65 @@ fun ChatScreen(
                             Text(if (state.isPaused) "Resume" else "Pause")
                         }
                         OutlinedButton(
-                            onClick = viewModel::stopResponse,
+                            onClick = {
+                                haptic.performPrimary()
+                                viewModel.stopResponse()
+                            },
                             modifier = Modifier.testTag("chat_cancel_run_button")
                         ) {
-                            Text("Cancel", color = NexaError)
+                            Text("Cancel", color = colors.error)
                         }
                     }
                 }
             }
         }
 
+        state.waitingForUnlock?.let { unlockRequest ->
+            UnlockWaitCard(
+                request = unlockRequest,
+                onContinue = {
+                    haptic.performConfirm()
+                    viewModel.continueUnlockWait()
+                },
+                onCancel = {
+                    haptic.performPrimary()
+                    viewModel.stopResponse()
+                },
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+        }
+
+        state.pendingAmbiguity?.let { ambiguityRequest ->
+            AmbiguitySelectionCard(
+                request = ambiguityRequest,
+                onSelectCandidate = { selectedPackage ->
+                    haptic.performConfirm()
+                    viewModel.selectAmbiguousApp(ambiguityRequest.selectionId, selectedPackage)
+                },
+                onCancel = {
+                    haptic.performPrimary()
+                    viewModel.selectAmbiguousApp(ambiguityRequest.selectionId, null)
+                },
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+        }
+
         state.pendingApproval?.let { approvalRequest ->
-            com.example.ui.components.ApprovalGateCard(
+            ApprovalGateCard(
                 request = approvalRequest,
-                onApprove = { viewModel.approveToolCall(approvalRequest.callId) },
-                onReject = { viewModel.rejectToolCall(approvalRequest.callId) },
+                onApprove = {
+                    haptic.performConfirm()
+                    viewModel.confirmApprovalWithAuth(
+                        activity = context.findActivity(),
+                        request = approvalRequest
+                    ) { intent ->
+                        deviceCredentialLauncher.launch(intent)
+                    }
+                },
+                onReject = {
+                    haptic.performPrimary()
+                    viewModel.rejectToolCall(approvalRequest.callId)
+                },
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
             )
         }
@@ -345,11 +501,11 @@ fun ChatScreen(
                 NoticeBanner(
                     icon = Icons.Outlined.WarningAmber,
                     text = state.attachmentNotices.joinToString(" "),
-                    accentColor = NexaWarning,
+                    accentColor = colors.warning,
                     modifier = Modifier.weight(1f)
                 )
                 TextButton(onClick = viewModel::dismissAttachmentNotices) {
-                    Text("Dismiss", color = NexaTextSecondary)
+                    Text("Dismiss", color = colors.textSecondary)
                 }
             }
         }
@@ -430,8 +586,9 @@ private fun ChatTopHeader(
     onNewChatClick: () -> Unit,
     onHistoryClick: () -> Unit
 ) {
+    val colors = NexaTheme.colors
     Surface(
-        color = NexaSecondaryBackground,
+        color = colors.secondaryBackground,
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
@@ -451,7 +608,7 @@ private fun ChatTopHeader(
                         Text(
                             text = stringResource(R.string.app_name),
                             style = MaterialTheme.typography.titleLarge,
-                            color = NexaTextPrimary
+                            color = colors.textPrimary
                         )
                         AgentStatusPill(status = agentStatus)
                     }
@@ -467,7 +624,7 @@ private fun ChatTopHeader(
                         Text(
                             text = modelLabel,
                             style = MaterialTheme.typography.labelSmall,
-                            color = NexaTextSecondary,
+                            color = colors.textSecondary,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -475,7 +632,7 @@ private fun ChatTopHeader(
                         Icon(
                             imageVector = Icons.Outlined.ExpandMore,
                             contentDescription = "Select AI model",
-                            tint = NexaTextSecondary,
+                            tint = colors.textSecondary,
                             modifier = Modifier.size(14.dp)
                         )
                     }
@@ -490,7 +647,7 @@ private fun ChatTopHeader(
                     Icon(
                         imageVector = Icons.Outlined.AddComment,
                         contentDescription = stringResource(R.string.chat_new_conversation),
-                        tint = NexaTextPrimary,
+                        tint = colors.textPrimary,
                         modifier = Modifier.size(20.dp)
                     )
                 }
@@ -503,7 +660,7 @@ private fun ChatTopHeader(
                     Icon(
                         imageVector = Icons.Outlined.History,
                         contentDescription = stringResource(R.string.chat_history),
-                        tint = NexaTextPrimary,
+                        tint = colors.textPrimary,
                         modifier = Modifier.size(21.dp)
                     )
                 }
@@ -512,7 +669,7 @@ private fun ChatTopHeader(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(1.dp)
-                    .background(NexaBorderSubtle)
+                    .background(colors.borderSubtle)
             )
         }
     }
@@ -520,13 +677,14 @@ private fun ChatTopHeader(
 
 @Composable
 private fun AgentStatusPill(status: AgentStatus) {
+    val colors = NexaTheme.colors
     val (fg, bg) = when (status) {
-        AgentStatus.IDLE -> NexaSuccess to NexaSuccessContainer
-        AgentStatus.PREVIEW -> NexaOrange to NexaOrangeMuted
-        AgentStatus.THINKING, AgentStatus.EXECUTING -> NexaInfo to NexaInfoContainer
-        AgentStatus.AWAITING_CONFIRMATION -> NexaWarning to NexaWarningContainer
-        AgentStatus.PAUSED -> NexaInfo to NexaInfoContainer
-        AgentStatus.OFFLINE -> NexaNeutral to NexaNeutralContainer
+        AgentStatus.IDLE -> colors.success to colors.successContainer
+        AgentStatus.PREVIEW -> colors.orange to colors.orangeMuted
+        AgentStatus.THINKING, AgentStatus.EXECUTING -> colors.info to colors.infoContainer
+        AgentStatus.AWAITING_CONFIRMATION, AgentStatus.WAITING_FOR_USER -> colors.warning to colors.warningContainer
+        AgentStatus.PAUSED -> colors.info to colors.infoContainer
+        AgentStatus.OFFLINE -> colors.neutral to colors.neutralContainer
     }
     StatusPill(label = status.label, textColor = fg, containerColor = bg)
 }
@@ -534,6 +692,7 @@ private fun AgentStatusPill(status: AgentStatus) {
 @Composable
 private fun ChatMessageRow(
     message: ChatMessage,
+    compactSpacing: Boolean,
     autoExpandPlan: Boolean,
     showSampleBadges: Boolean,
     showCodeLineNumbers: Boolean,
@@ -547,6 +706,7 @@ private fun ChatMessageRow(
     onOpenAccessibilitySettings: () -> Unit,
     onRequestScreenCapture: () -> Unit
 ) {
+    val colors = NexaTheme.colors
     if (message.role == MessageRole.USER) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -556,21 +716,24 @@ private fun ChatMessageRow(
                 modifier = Modifier
                     .widthIn(max = 310.dp)
                     .clip(RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp))
-                    .background(NexaElevatedSurface)
-                    .border(1.dp, NexaBorder, RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp))
-                    .padding(horizontal = 14.dp, vertical = 11.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                    .background(colors.elevatedSurface)
+                    .border(1.dp, colors.border, RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp))
+                    .padding(
+                        horizontal = if (compactSpacing) 12.dp else 14.dp,
+                        vertical = if (compactSpacing) 8.dp else 11.dp
+                    ),
+                verticalArrangement = Arrangement.spacedBy(if (compactSpacing) 4.dp else 6.dp)
             ) {
                 Text(
                     text = message.content,
                     style = MaterialTheme.typography.bodyLarge,
-                    color = NexaTextPrimary
+                    color = colors.textPrimary
                 )
                 if (message.attachments.isNotEmpty()) {
                     Text(
                         text = "Attached: ${message.attachments.joinToString()}",
                         style = MaterialTheme.typography.labelSmall,
-                        color = NexaTextSecondary
+                        color = colors.textSecondary
                     )
                 }
             }
@@ -578,7 +741,7 @@ private fun ChatMessageRow(
     } else {
         Column(
             modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(if (compactSpacing) 6.dp else 10.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -588,13 +751,13 @@ private fun ChatMessageRow(
                 Text(
                     text = "Nexa",
                     style = MaterialTheme.typography.titleSmall,
-                    color = NexaTextPrimary
+                    color = colors.textPrimary
                 )
                 if (!message.modelLabel.isNullOrBlank()) {
                     Text(
                         text = message.modelLabel.substringAfterLast("/"),
                         style = MaterialTheme.typography.labelSmall,
-                        color = NexaTextSecondary,
+                        color = colors.textSecondary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
@@ -605,22 +768,22 @@ private fun ChatMessageRow(
                         CircularProgressIndicator(
                             modifier = Modifier.size(12.dp),
                             strokeWidth = 1.8.dp,
-                            color = NexaOrange
+                            color = colors.orange
                         )
                     }
                     MessageStatus.STOPPED -> {
                         StatusPill(
                             label = "Stopped",
-                            textColor = NexaWarning,
-                            containerColor = NexaWarningContainer,
+                            textColor = colors.warning,
+                            containerColor = colors.warningContainer,
                             showDot = false
                         )
                     }
                     MessageStatus.FAILED -> {
                         StatusPill(
                             label = "Error",
-                            textColor = NexaError,
-                            containerColor = NexaErrorContainer,
+                            textColor = colors.error,
+                            containerColor = colors.errorContainer,
                             showDot = false
                         )
                     }
@@ -641,7 +804,7 @@ private fun ChatMessageRow(
                     Text(
                         text = "Thinking…",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = NexaTextSecondary
+                        color = colors.textSecondary
                     )
                 }
             } else if (message.content.isNotBlank()) {
@@ -655,13 +818,13 @@ private fun ChatMessageRow(
                 NoticeBanner(
                     icon = Icons.Outlined.ErrorOutline,
                     text = message.errorMessage,
-                    accentColor = NexaError
+                    accentColor = colors.error
                 )
             } else if (message.status == MessageStatus.STOPPED && message.content.isBlank() && !message.errorMessage.isNullOrBlank()) {
                 Text(
                     text = message.errorMessage,
                     style = MaterialTheme.typography.bodySmall,
-                    color = NexaTextSecondary
+                    color = colors.textSecondary
                 )
             }
 
@@ -701,13 +864,13 @@ private fun ChatMessageRow(
                             Icon(
                                 imageVector = Icons.Outlined.AccessibilityNew,
                                 contentDescription = null,
-                                tint = NexaOrange,
+                                tint = colors.orange,
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
                                 text = stringResource(R.string.open_accessibility_settings),
-                                color = NexaOrange
+                                color = colors.orange
                             )
                         }
                     }
@@ -721,13 +884,13 @@ private fun ChatMessageRow(
                             Icon(
                                 imageVector = Icons.Outlined.Screenshot,
                                 contentDescription = null,
-                                tint = NexaOrange,
+                                tint = colors.orange,
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
                                 text = stringResource(R.string.grant_screen_capture_permission),
-                                color = NexaOrange
+                                color = colors.orange
                             )
                         }
                     }
@@ -756,7 +919,7 @@ private fun ChatMessageRow(
                         message.errorMessage?.contains("API key", ignoreCase = true) == true
                     if (needsConfig) {
                         TextButton(onClick = onOpenConnections) {
-                            Text("Open Connections", color = NexaOrange)
+                            Text("Open Connections", color = colors.orange)
                         }
                     }
                 }
@@ -766,7 +929,7 @@ private fun ChatMessageRow(
                 Text(
                     text = "${message.tokenUsage.totalTokens} tokens",
                     style = MaterialTheme.typography.labelSmall,
-                    color = NexaTextTertiary
+                    color = colors.textTertiary
                 )
             }
 
@@ -774,7 +937,7 @@ private fun ChatMessageRow(
                 Text(
                     text = verification.summaryNote,
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (verification.isVerified) NexaSuccess else NexaWarning
+                    color = if (verification.isVerified) colors.success else colors.warning
                 )
             }
 
@@ -804,6 +967,7 @@ internal fun ChatEmptyWelcome(
     registeredTools: List<RegisteredToolEntry>,
     accessibilityState: AccessibilityRuntimeState,
     mediaProjectionState: MediaProjectionConsentState,
+    allowAppLaunchSuggestions: Boolean = true,
     onPromptSelect: (String) -> Unit,
     onConfigureProvider: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
@@ -811,6 +975,7 @@ internal fun ChatEmptyWelcome(
     onStopScreenCapture: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val colors = NexaTheme.colors
     val isProviderReady = defaultProvider != null &&
         !defaultProvider.credentialInvalidated &&
         (defaultProvider.hasApiKey || defaultProvider.providerType.requiresBaseUrl) &&
@@ -827,7 +992,7 @@ internal fun ChatEmptyWelcome(
     val captureActive = mediaProjectionState == MediaProjectionConsentState.GRANTED_ACTIVE
 
     val starters = buildList {
-        if (appLaunchReady) {
+        if (appLaunchReady && allowAppLaunchSuggestions) {
             add("List installed apps on this device or open YouTube.")
         }
         if (accessibilityReady) {
@@ -851,7 +1016,7 @@ internal fun ChatEmptyWelcome(
         Text(
             text = "Ask Nexa anything",
             style = MaterialTheme.typography.headlineMedium,
-            color = NexaTextPrimary
+            color = colors.textPrimary
         )
         Text(
             text = if (isProviderReady) {
@@ -860,7 +1025,7 @@ internal fun ChatEmptyWelcome(
                 "Connect OpenRouter, Google Gemini, OpenAI, Anthropic, or a custom compatible endpoint to start live conversations."
             },
             style = MaterialTheme.typography.bodyMedium,
-            color = NexaTextSecondary
+            color = colors.textSecondary
         )
 
         FlowRow(
@@ -873,24 +1038,24 @@ internal fun ChatEmptyWelcome(
             Box(modifier = Modifier.testTag("welcome_pill_utilities")) {
                 StatusPill(
                     label = "Utilities · Ready",
-                    textColor = NexaSuccess,
-                    containerColor = NexaSuccessContainer,
+                    textColor = colors.success,
+                    containerColor = colors.successContainer,
                     showDot = true
                 )
             }
             Box(modifier = Modifier.testTag("welcome_pill_app_launch")) {
                 StatusPill(
                     label = if (appLaunchReady) "App Launch · Active" else "App Launch · Off",
-                    textColor = if (appLaunchReady) NexaSuccess else NexaWarning,
-                    containerColor = if (appLaunchReady) NexaSuccessContainer else NexaWarningContainer,
+                    textColor = if (appLaunchReady) colors.success else colors.warning,
+                    containerColor = if (appLaunchReady) colors.successContainer else colors.warningContainer,
                     showDot = appLaunchReady
                 )
             }
             Box(modifier = Modifier.testTag("welcome_pill_accessibility")) {
                 StatusPill(
                     label = "Screen UI · ${accessibilityState.label}",
-                    textColor = if (accessibilityReady) NexaSuccess else NexaWarning,
-                    containerColor = if (accessibilityReady) NexaSuccessContainer else NexaWarningContainer,
+                    textColor = if (accessibilityReady) colors.success else colors.warning,
+                    containerColor = if (accessibilityReady) colors.successContainer else colors.warningContainer,
                     showDot = accessibilityReady
                 )
             }
@@ -898,14 +1063,14 @@ internal fun ChatEmptyWelcome(
                 StatusPill(
                     label = "Capture · ${mediaProjectionState.label}",
                     textColor = when {
-                        captureActive -> NexaSuccess
-                        mediaProjectionState == MediaProjectionConsentState.UNSUPPORTED -> NexaNeutral
-                        else -> NexaWarning
+                        captureActive -> colors.success
+                        mediaProjectionState == MediaProjectionConsentState.UNSUPPORTED -> colors.neutral
+                        else -> colors.warning
                     },
                     containerColor = when {
-                        captureActive -> NexaSuccessContainer
-                        mediaProjectionState == MediaProjectionConsentState.UNSUPPORTED -> NexaNeutralContainer
-                        else -> NexaWarningContainer
+                        captureActive -> colors.successContainer
+                        mediaProjectionState == MediaProjectionConsentState.UNSUPPORTED -> colors.neutralContainer
+                        else -> colors.warningContainer
                     },
                     showDot = captureActive
                 )
@@ -928,13 +1093,13 @@ internal fun ChatEmptyWelcome(
                         Icon(
                             imageVector = Icons.Outlined.AccessibilityNew,
                             contentDescription = null,
-                            tint = NexaOrange,
+                            tint = colors.orange,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = stringResource(R.string.open_accessibility_settings),
-                            color = NexaOrange
+                            color = colors.orange
                         )
                     }
                 }
@@ -948,13 +1113,13 @@ internal fun ChatEmptyWelcome(
                         Icon(
                             imageVector = Icons.Outlined.StopCircle,
                             contentDescription = null,
-                            tint = NexaError,
+                            tint = colors.error,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = stringResource(R.string.stop_screen_capture),
-                            color = NexaError
+                            color = colors.error
                         )
                     }
                 } else if (mediaProjectionState != MediaProjectionConsentState.UNSUPPORTED) {
@@ -967,13 +1132,13 @@ internal fun ChatEmptyWelcome(
                         Icon(
                             imageVector = Icons.Outlined.Screenshot,
                             contentDescription = null,
-                            tint = NexaOrange,
+                            tint = colors.orange,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = stringResource(R.string.grant_screen_capture_permission),
-                            color = NexaOrange
+                            color = colors.orange
                         )
                     }
                 }
@@ -988,8 +1153,8 @@ internal fun ChatEmptyWelcome(
                     .heightIn(min = 48.dp)
                     .testTag("empty_configure_provider_button"),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = NexaOrange,
-                    contentColor = NexaOnOrange
+                    containerColor = colors.orange,
+                    contentColor = colors.onOrange
                 )
             ) {
                 Icon(Icons.Outlined.SettingsEthernet, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -1009,13 +1174,19 @@ internal fun ChatEmptyWelcome(
                 Text(
                     text = starter,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = NexaTextPrimary,
+                    color = colors.textPrimary,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
             }
         }
     }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 private fun resolveDisplayName(context: Context, uri: Uri): String? {

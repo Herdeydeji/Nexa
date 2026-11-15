@@ -68,5 +68,7 @@ data class Conversation(
     val isSamplePreview: Boolean,
     val createdAtMillis: Long,
     val updatedAtMillis: Long,
-    val lastMessagePreview: String = ""
+    val lastMessagePreview: String = "",
+    val preferredProviderId: String? = null,
+    val preferredModelId: String? = null
 )

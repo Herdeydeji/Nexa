@@ -64,22 +64,7 @@ import com.example.ui.components.EmptyStateView
 import com.example.ui.components.NoticeBanner
 import com.example.ui.components.SampleDataBadge
 import com.example.ui.components.StatusPill
-import com.example.ui.theme.NexaBorder
-import com.example.ui.theme.NexaElevatedSurface
-import com.example.ui.theme.NexaError
-import com.example.ui.theme.NexaErrorContainer
-import com.example.ui.theme.NexaNeutral
-import com.example.ui.theme.NexaNeutralContainer
-import com.example.ui.theme.NexaOnOrange
-import com.example.ui.theme.NexaOrange
-import com.example.ui.theme.NexaOrangeMuted
-import com.example.ui.theme.NexaSecondaryBackground
-import com.example.ui.theme.NexaSuccess
-import com.example.ui.theme.NexaSuccessContainer
-import com.example.ui.theme.NexaTextPrimary
-import com.example.ui.theme.NexaTextSecondary
-import com.example.ui.theme.NexaWarning
-import com.example.ui.theme.NexaWarningContainer
+import com.example.ui.theme.NexaTheme
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -92,12 +77,13 @@ fun ConversationHistorySheet(
     onDeleteConversation: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val colors = NexaTheme.colors
     var renamingTarget by remember { mutableStateOf<Conversation?>(null) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = NexaSecondaryBackground,
-        contentColor = NexaTextPrimary
+        containerColor = colors.secondaryBackground,
+        contentColor = colors.textPrimary
     ) {
         Column(
             modifier = Modifier
@@ -113,7 +99,7 @@ fun ConversationHistorySheet(
                 Text(
                     text = "Conversation History",
                     style = MaterialTheme.typography.titleLarge,
-                    color = NexaTextPrimary
+                    color = colors.textPrimary
                 )
                 Button(
                     onClick = {
@@ -121,8 +107,8 @@ fun ConversationHistorySheet(
                         onDismiss()
                     },
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = NexaOrange,
-                        contentColor = NexaOnOrange
+                        containerColor = colors.orange,
+                        contentColor = colors.onOrange
                     )
                 ) {
                     Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -149,10 +135,10 @@ fun ConversationHistorySheet(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(if (isActive) NexaElevatedSurface else NexaSecondaryBackground)
+                                .background(if (isActive) colors.elevatedSurface else colors.secondaryBackground)
                                 .border(
                                     1.dp,
-                                    if (isActive) NexaOrange else NexaBorder,
+                                    if (isActive) colors.orange else colors.border,
                                     RoundedCornerShape(12.dp)
                                 )
                                 .clickable {
@@ -170,7 +156,7 @@ fun ConversationHistorySheet(
                                     Text(
                                         text = item.title,
                                         style = MaterialTheme.typography.titleSmall,
-                                        color = NexaTextPrimary,
+                                        color = colors.textPrimary,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.weight(1f, fill = false)
@@ -184,7 +170,7 @@ fun ConversationHistorySheet(
                                     Text(
                                         text = item.lastMessagePreview,
                                         style = MaterialTheme.typography.bodySmall,
-                                        color = NexaTextSecondary,
+                                        color = colors.textSecondary,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
@@ -197,7 +183,7 @@ fun ConversationHistorySheet(
                                 Icon(
                                     imageVector = Icons.Outlined.Edit,
                                     contentDescription = "Rename conversation",
-                                    tint = NexaTextSecondary,
+                                    tint = colors.textSecondary,
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
@@ -208,7 +194,7 @@ fun ConversationHistorySheet(
                                 Icon(
                                     imageVector = Icons.Outlined.DeleteOutline,
                                     contentDescription = "Delete conversation",
-                                    tint = NexaTextSecondary,
+                                    tint = colors.textSecondary,
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
@@ -223,8 +209,8 @@ fun ConversationHistorySheet(
         var text by remember(target.id) { mutableStateOf(target.title) }
         AlertDialog(
             onDismissRequest = { renamingTarget = null },
-            containerColor = NexaElevatedSurface,
-            title = { Text("Rename conversation", color = NexaTextPrimary) },
+            containerColor = colors.elevatedSurface,
+            title = { Text("Rename conversation", color = colors.textPrimary) },
             text = {
                 OutlinedTextField(
                     value = text,
@@ -240,12 +226,12 @@ fun ConversationHistorySheet(
                         renamingTarget = null
                     }
                 ) {
-                    Text("Save", color = NexaOrange)
+                    Text("Save", color = colors.orange)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { renamingTarget = null }) {
-                    Text("Cancel", color = NexaTextSecondary)
+                    Text("Cancel", color = colors.textSecondary)
                 }
             }
         )
@@ -260,6 +246,7 @@ fun ModelSelectorSheet(
     onOpenConnections: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val colors = NexaTheme.colors
     val configuredProviders = providers.filter {
         (it.hasApiKey || (it.providerType.requiresBaseUrl && it.baseUrl.isNotBlank())) &&
             !it.credentialInvalidated
@@ -284,8 +271,8 @@ fun ModelSelectorSheet(
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = NexaSecondaryBackground,
-        contentColor = NexaTextPrimary
+        containerColor = colors.secondaryBackground,
+        contentColor = colors.textPrimary
     ) {
         Column(
             modifier = Modifier
@@ -302,7 +289,7 @@ fun ModelSelectorSheet(
                 Text(
                     text = "Model Selector",
                     style = MaterialTheme.typography.titleLarge,
-                    color = NexaTextPrimary
+                    color = colors.textPrimary
                 )
                 TextButton(
                     onClick = {
@@ -310,7 +297,7 @@ fun ModelSelectorSheet(
                         onOpenConnections()
                     }
                 ) {
-                    Text("Manage Providers", color = NexaOrange)
+                    Text("Manage Providers", color = colors.orange)
                 }
             }
 
@@ -326,8 +313,8 @@ fun ModelSelectorSheet(
                     },
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = NexaOrange,
-                        contentColor = NexaOnOrange
+                        containerColor = colors.orange,
+                        contentColor = colors.onOrange
                     )
                 ) {
                     Icon(Icons.Outlined.SettingsEthernet, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -348,7 +335,7 @@ fun ModelSelectorSheet(
                         Icon(
                             imageVector = Icons.Outlined.Search,
                             contentDescription = null,
-                            tint = NexaTextSecondary
+                            tint = colors.textSecondary
                         )
                     },
                     trailingIcon = {
@@ -357,7 +344,7 @@ fun ModelSelectorSheet(
                                 Icon(
                                     imageVector = Icons.Outlined.Close,
                                     contentDescription = "Clear model search",
-                                    tint = NexaTextSecondary
+                                    tint = colors.textSecondary
                                 )
                             }
                         }
@@ -368,7 +355,7 @@ fun ModelSelectorSheet(
                     Text(
                         text = "No configured models match \"$searchQuery\".",
                         style = MaterialTheme.typography.bodySmall,
-                        color = NexaTextSecondary
+                        color = colors.textSecondary
                     )
                 } else {
                     LazyColumn(
@@ -389,12 +376,12 @@ fun ModelSelectorSheet(
                                     Text(
                                         text = provider.providerType.displayName,
                                         style = MaterialTheme.typography.titleSmall,
-                                        color = NexaTextPrimary
+                                        color = colors.textPrimary
                                     )
                                     Text(
                                         text = provider.maskedApiKey.ifBlank { "Endpoint only" },
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = NexaTextSecondary
+                                        color = colors.textSecondary
                                     )
                                 }
                             }
@@ -403,7 +390,7 @@ fun ModelSelectorSheet(
                                     Text(
                                         text = "No models discovered yet. Open Connections to refresh models or enter a manual model ID.",
                                         style = MaterialTheme.typography.bodySmall,
-                                        color = NexaTextSecondary,
+                                        color = colors.textSecondary,
                                         modifier = Modifier.padding(bottom = 6.dp)
                                     )
                                 }
@@ -417,10 +404,10 @@ fun ModelSelectorSheet(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .clip(RoundedCornerShape(10.dp))
-                                            .background(if (isSelected) NexaOrangeMuted else NexaElevatedSurface)
+                                            .background(if (isSelected) colors.orangeMuted else colors.elevatedSurface)
                                             .border(
                                                 1.dp,
-                                                if (isSelected) NexaOrange else NexaBorder,
+                                                if (isSelected) colors.orange else colors.border,
                                                 RoundedCornerShape(10.dp)
                                             )
                                             .clickable {
@@ -435,7 +422,7 @@ fun ModelSelectorSheet(
                                             Text(
                                                 text = model.displayName,
                                                 style = MaterialTheme.typography.bodyMedium,
-                                                color = if (isSelected) NexaOrange else NexaTextPrimary,
+                                                color = if (isSelected) colors.orange else colors.textPrimary,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis
                                             )
@@ -453,7 +440,7 @@ fun ModelSelectorSheet(
                                                     if (model.supportsVision) append(" · Vision")
                                                 },
                                                 style = MaterialTheme.typography.labelSmall,
-                                                color = NexaTextSecondary,
+                                                color = colors.textSecondary,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis
                                             )
@@ -462,7 +449,7 @@ fun ModelSelectorSheet(
                                             Icon(
                                                 imageVector = Icons.Outlined.Check,
                                                 contentDescription = "Selected model",
-                                                tint = NexaOrange,
+                                                tint = colors.orange,
                                                 modifier = Modifier.size(18.dp)
                                             )
                                         }
@@ -484,10 +471,11 @@ fun AttachmentPickerSheet(
     onPickDocument: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val colors = NexaTheme.colors
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = NexaSecondaryBackground,
-        contentColor = NexaTextPrimary
+        containerColor = colors.secondaryBackground,
+        contentColor = colors.textPrimary
     ) {
         Column(
             modifier = Modifier
@@ -499,12 +487,12 @@ fun AttachmentPickerSheet(
             Text(
                 text = "Attach Context",
                 style = MaterialTheme.typography.titleLarge,
-                color = NexaTextPrimary
+                color = colors.textPrimary
             )
             Text(
                 text = "Text and source files are sent in prompt context. Images are sent only when the selected model reports vision support.",
                 style = MaterialTheme.typography.bodySmall,
-                color = NexaTextSecondary
+                color = colors.textSecondary
             )
             OutlinedButton(
                 onClick = {
@@ -515,9 +503,9 @@ fun AttachmentPickerSheet(
                     .fillMaxWidth()
                     .testTag("attach_photo_option")
             ) {
-                Icon(Icons.Outlined.Image, contentDescription = null, tint = NexaOrange)
+                Icon(Icons.Outlined.Image, contentDescription = null, tint = colors.orange)
                 Spacer(modifier = Modifier.width(10.dp))
-                Text("Select Photo or Screenshot", color = NexaTextPrimary)
+                Text("Select Photo or Screenshot", color = colors.textPrimary)
             }
             OutlinedButton(
                 onClick = {
@@ -528,9 +516,9 @@ fun AttachmentPickerSheet(
                     .fillMaxWidth()
                     .testTag("attach_document_option")
             ) {
-                Icon(Icons.Outlined.Description, contentDescription = null, tint = NexaOrange)
+                Icon(Icons.Outlined.Description, contentDescription = null, tint = colors.orange)
                 Spacer(modifier = Modifier.width(10.dp))
-                Text("Select Text or Code File", color = NexaTextPrimary)
+                Text("Select Text or Code File", color = colors.textPrimary)
             }
         }
     }
@@ -542,10 +530,11 @@ fun VoiceInputSheet(
     onInsertSamplePhrase: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val colors = NexaTheme.colors
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = NexaSecondaryBackground,
-        contentColor = NexaTextPrimary
+        containerColor = colors.secondaryBackground,
+        contentColor = colors.textPrimary
     ) {
         Column(
             modifier = Modifier
@@ -558,21 +547,21 @@ fun VoiceInputSheet(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Icon(Icons.Outlined.Mic, contentDescription = null, tint = NexaOrange)
+                Icon(Icons.Outlined.Mic, contentDescription = null, tint = colors.orange)
                 Text(
                     text = "Voice Input Interface",
                     style = MaterialTheme.typography.titleLarge,
-                    color = NexaTextPrimary
+                    color = colors.textPrimary
                 )
             }
             NoticeBanner(
                 icon = Icons.Outlined.Info,
-                text = "Live audio capture and speech-to-text are not active in Phase 2. Microphone permission is not requested."
+                text = "Live audio capture and speech-to-text are not active in this build. Microphone permission is not requested."
             )
             Text(
                 text = "Insert a prompt into the composer:",
                 style = MaterialTheme.typography.bodySmall,
-                color = NexaTextSecondary
+                color = colors.textSecondary
             )
             OutlinedButton(
                 onClick = {
@@ -581,7 +570,7 @@ fun VoiceInputSheet(
                 },
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("Insert technical prompt", color = NexaTextPrimary)
+                Text("Insert technical prompt", color = colors.textPrimary)
             }
             OutlinedButton(
                 onClick = {
@@ -590,7 +579,7 @@ fun VoiceInputSheet(
                 },
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("Insert code review prompt", color = NexaTextPrimary)
+                Text("Insert code review prompt", color = colors.textPrimary)
             }
         }
     }
@@ -606,6 +595,7 @@ fun ToolsCatalogSheet(
     onRequestScreenCapture: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
+    val colors = NexaTheme.colors
     val activeCount = if (registeredTools.isNotEmpty()) {
         registeredTools.count { it.isAvailable }
     } else {
@@ -622,8 +612,8 @@ fun ToolsCatalogSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = NexaSecondaryBackground,
-        contentColor = NexaTextPrimary
+        containerColor = colors.secondaryBackground,
+        contentColor = colors.textPrimary
     ) {
         Column(
             modifier = Modifier
@@ -640,19 +630,19 @@ fun ToolsCatalogSheet(
                 Text(
                     text = "Registered Agent Tools",
                     style = MaterialTheme.typography.titleLarge,
-                    color = NexaTextPrimary
+                    color = colors.textPrimary
                 )
                 StatusPill(
                     label = "$activeCount ready",
-                    textColor = NexaSuccess,
-                    containerColor = NexaSuccessContainer,
+                    textColor = colors.success,
+                    containerColor = colors.successContainer,
                     showDot = true
                 )
             }
             Text(
                 text = "Live synchronized tool catalog sent to tool-capable models. Unavailable tools show exact permission or consent requirements.",
                 style = MaterialTheme.typography.bodySmall,
-                color = NexaTextSecondary
+                color = colors.textSecondary
             )
             LazyColumn(
                 modifier = Modifier
@@ -665,21 +655,21 @@ fun ToolsCatalogSheet(
                     items(sorted, key = { "reg_${it.definition.id}" }) { entry ->
                         val def = entry.definition
                         val (statusFg, statusBg) = when (entry.availabilityStatus) {
-                            ToolAvailabilityStatus.AVAILABLE -> NexaSuccess to NexaSuccessContainer
+                            ToolAvailabilityStatus.AVAILABLE -> colors.success to colors.successContainer
                             ToolAvailabilityStatus.SETUP_REQUIRED,
                             ToolAvailabilityStatus.CONSENT_REQUIRED,
-                            ToolAvailabilityStatus.TEMPORARILY_UNAVAILABLE -> NexaWarning to NexaWarningContainer
+                            ToolAvailabilityStatus.TEMPORARILY_UNAVAILABLE -> colors.warning to colors.warningContainer
                             ToolAvailabilityStatus.DISABLED_BY_USER,
-                            ToolAvailabilityStatus.UNSUPPORTED -> NexaError to NexaErrorContainer
+                            ToolAvailabilityStatus.UNSUPPORTED -> colors.error to colors.errorContainer
                         }
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(NexaElevatedSurface)
+                                .background(colors.elevatedSurface)
                                 .border(
                                     1.dp,
-                                    if (entry.isAvailable) NexaBorder else NexaWarning.copy(alpha = 0.45f),
+                                    if (entry.isAvailable) colors.border else colors.warning.copy(alpha = 0.45f),
                                     RoundedCornerShape(12.dp)
                                 )
                                 .padding(12.dp)
@@ -694,7 +684,7 @@ fun ToolsCatalogSheet(
                                 Text(
                                     text = def.name,
                                     style = MaterialTheme.typography.titleSmall,
-                                    color = NexaTextPrimary,
+                                    color = colors.textPrimary,
                                     modifier = Modifier.weight(1f, fill = false)
                                 )
                                 StatusPill(
@@ -707,18 +697,18 @@ fun ToolsCatalogSheet(
                             Text(
                                 text = def.description,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = NexaTextSecondary
+                                color = colors.textSecondary
                             )
                             Text(
                                 text = "${entry.capabilityRequirement.label} · ${def.riskCategory.label} · ${def.parameters.size} param${if (def.parameters.size == 1) "" else "s"}",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = NexaTextSecondary
+                                color = colors.textSecondary
                             )
                             if (!entry.isAvailable) {
                                 Text(
                                     text = entry.availabilityReason,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = NexaWarning
+                                    color = colors.warning
                                 )
                                 when (entry.recoveryAction) {
                                     ToolRecoveryAction.OPEN_ACCESSIBILITY_SETTINGS -> if (onOpenAccessibilitySettings != null) {
@@ -729,7 +719,7 @@ fun ToolsCatalogSheet(
                                             },
                                             modifier = Modifier.testTag("tool_recovery_accessibility_${def.name}")
                                         ) {
-                                            Text("Open Accessibility Settings", color = NexaOrange)
+                                            Text("Open Accessibility Settings", color = colors.orange)
                                         }
                                     }
                                     ToolRecoveryAction.REQUEST_MEDIA_PROJECTION -> if (onRequestScreenCapture != null) {
@@ -740,7 +730,7 @@ fun ToolsCatalogSheet(
                                             },
                                             modifier = Modifier.testTag("tool_recovery_screen_capture_${def.name}")
                                         ) {
-                                            Text("Grant Screen Capture", color = NexaOrange)
+                                            Text("Grant Screen Capture", color = colors.orange)
                                         }
                                     }
                                     else -> Unit
@@ -754,8 +744,8 @@ fun ToolsCatalogSheet(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(NexaElevatedSurface)
-                                .border(1.dp, NexaBorder, RoundedCornerShape(12.dp))
+                                .background(colors.elevatedSurface)
+                                .border(1.dp, colors.border, RoundedCornerShape(12.dp))
                                 .padding(12.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
@@ -767,35 +757,35 @@ fun ToolsCatalogSheet(
                                 Text(
                                     text = def.name,
                                     style = MaterialTheme.typography.titleSmall,
-                                    color = NexaTextPrimary
+                                    color = colors.textPrimary
                                 )
                                 StatusPill(
                                     label = def.riskCategory.label,
-                                    textColor = NexaSuccess,
-                                    containerColor = NexaSuccessContainer,
+                                    textColor = colors.success,
+                                    containerColor = colors.successContainer,
                                     showDot = false
                                 )
                             }
                             Text(
                                 text = def.description,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = NexaTextSecondary
+                                color = colors.textSecondary
                             )
                         }
                     }
                 }
                 items(tools.filterNot { it.id in registeredIds }, key = { it.id }) { tool ->
                     val (riskFg, riskBg) = when (tool.riskLevel) {
-                        ToolRiskLevel.LOW -> NexaSuccess to NexaSuccessContainer
-                        ToolRiskLevel.MEDIUM -> NexaWarning to NexaWarningContainer
-                        ToolRiskLevel.HIGH -> NexaError to NexaErrorContainer
+                        ToolRiskLevel.LOW -> colors.success to colors.successContainer
+                        ToolRiskLevel.MEDIUM -> colors.warning to colors.warningContainer
+                        ToolRiskLevel.HIGH -> colors.error to colors.errorContainer
                     }
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
-                            .background(NexaElevatedSurface)
-                            .border(1.dp, NexaBorder, RoundedCornerShape(12.dp))
+                            .background(colors.elevatedSurface)
+                            .border(1.dp, colors.border, RoundedCornerShape(12.dp))
                             .padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
@@ -807,7 +797,7 @@ fun ToolsCatalogSheet(
                             Text(
                                 text = tool.name,
                                 style = MaterialTheme.typography.titleSmall,
-                                color = NexaTextPrimary
+                                color = colors.textPrimary
                             )
                             StatusPill(
                                 label = tool.riskLevel.label,
@@ -819,7 +809,7 @@ fun ToolsCatalogSheet(
                         Text(
                             text = tool.description,
                             style = MaterialTheme.typography.bodySmall,
-                            color = NexaTextSecondary
+                            color = colors.textSecondary
                         )
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -828,12 +818,12 @@ fun ToolsCatalogSheet(
                             Text(
                                 text = tool.id,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = NexaTextSecondary
+                                color = colors.textSecondary
                             )
                             Text(
                                 text = if (tool.isPhase1Implemented) "Active (Attachments)" else "Planned (Disabled)",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (tool.isPhase1Implemented) NexaSuccess else NexaNeutral
+                                color = if (tool.isPhase1Implemented) colors.success else colors.neutral
                             )
                         }
                     }

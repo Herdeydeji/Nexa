@@ -54,13 +54,8 @@ import com.example.ui.settings.SettingsViewModel
 import com.example.ui.tasks.TaskDetailScreen
 import com.example.ui.tasks.TasksScreen
 import com.example.ui.tasks.TasksViewModel
-import com.example.ui.theme.NexaBackground
-import com.example.ui.theme.NexaBorderSubtle
-import com.example.ui.theme.NexaOrange
-import com.example.ui.theme.NexaOrangeMuted
-import com.example.ui.theme.NexaSecondaryBackground
-import com.example.ui.theme.NexaTextPrimary
-import com.example.ui.theme.NexaTextSecondary
+import com.example.ui.theme.LocalNexaHapticFeedback
+import com.example.ui.theme.NexaTheme
 
 sealed class NexaRoute(val route: String) {
     data object Chat : NexaRoute("chat")
@@ -94,6 +89,8 @@ fun NexaAppShell(
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
 
+    val haptic = LocalNexaHapticFeedback.current
+
     val chatViewModel: ChatViewModel = viewModel(
         factory = ChatViewModel.Factory(
             chatRepository = container.chatRepository,
@@ -108,7 +105,10 @@ fun NexaAppShell(
             agentRunController = container.agentRunController,
             permissionManager = container.permissionManager,
             taskNotificationManager = container.taskNotificationManager,
-            mediaProjectionSessionManager = container.mediaProjectionSessionManager
+            mediaProjectionSessionManager = container.mediaProjectionSessionManager,
+            floatingIndicatorController = container.floatingIndicatorController,
+            memoryRepository = container.memoryRepository,
+            approvalAuthenticator = container.approvalAuthenticator
         )
     )
     val tasksViewModel: TasksViewModel = viewModel(
@@ -121,20 +121,27 @@ fun NexaAppShell(
         factory = ConnectionsViewModel.Factory(
             connectionsRepository = container.connectionsRepository,
             permissionManager = container.permissionManager,
-            mediaProjectionSessionManager = container.mediaProjectionSessionManager
+            mediaProjectionSessionManager = container.mediaProjectionSessionManager,
+            appDiscovery = container.appDiscovery,
+            appLauncher = container.appLauncher
         )
     )
     val settingsViewModel: SettingsViewModel = viewModel(
         factory = SettingsViewModel.Factory(
             settingsRepository = container.settingsRepository,
             connectionsRepository = container.connectionsRepository,
-            chatRepository = container.chatRepository
+            chatRepository = container.chatRepository,
+            permissionManager = container.permissionManager,
+            floatingIndicatorController = container.floatingIndicatorController,
+            memoryRepository = container.memoryRepository,
+            taskRepository = container.taskRepository
         )
     )
 
     val showBottomBar = currentRoute in NexaNavTab.entries.map { it.route }
 
     fun navigateTopLevel(route: String) {
+        haptic.performPrimary()
         navController.navigate(route) {
             popUpTo(navController.graph.findStartDestination().id) {
                 saveState = true
@@ -152,9 +159,9 @@ fun NexaAppShell(
     Scaffold(
         modifier = modifier
             .fillMaxSize()
-            .background(NexaBackground)
+            .background(NexaTheme.colors.background)
             .imePadding(),
-        containerColor = NexaBackground,
+        containerColor = NexaTheme.colors.background,
         contentWindowInsets = WindowInsets.safeDrawing,
         bottomBar = {
             if (showBottomBar) {
@@ -163,10 +170,10 @@ fun NexaAppShell(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(1.dp)
-                            .background(NexaBorderSubtle)
+                            .background(NexaTheme.colors.borderSubtle)
                     )
                     NavigationBar(
-                        containerColor = NexaSecondaryBackground,
+                        containerColor = NexaTheme.colors.secondaryBackground,
                         tonalElevation = 0.dp
                     ) {
                         NexaNavTab.entries.forEach { tab ->
@@ -183,11 +190,11 @@ fun NexaAppShell(
                                 },
                                 label = { Text(stringResource(tab.labelRes)) },
                                 colors = NavigationBarItemDefaults.colors(
-                                    selectedIconColor = NexaOrange,
-                                    selectedTextColor = NexaTextPrimary,
-                                    indicatorColor = NexaOrangeMuted,
-                                    unselectedIconColor = NexaTextSecondary,
-                                    unselectedTextColor = NexaTextSecondary
+                                    selectedIconColor = NexaTheme.colors.orange,
+                                    selectedTextColor = NexaTheme.colors.textPrimary,
+                                    indicatorColor = NexaTheme.colors.orangeMuted,
+                                    unselectedIconColor = NexaTheme.colors.textSecondary,
+                                    unselectedTextColor = NexaTheme.colors.textSecondary
                                 )
                             )
                         }

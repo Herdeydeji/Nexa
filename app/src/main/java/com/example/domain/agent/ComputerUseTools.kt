@@ -12,6 +12,7 @@ import com.example.domain.model.ToolDefinition
 import com.example.domain.model.ToolParameter
 import com.example.domain.model.ToolParameterType
 import com.example.domain.model.ToolRiskCategory
+import com.example.domain.model.YouTubePlayStatus
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -20,6 +21,8 @@ object ComputerUseTools {
         ListInstalledAppsTool(runtime),
         FindAppTool(runtime),
         LaunchAppTool(runtime),
+        OpenUrlTool(runtime),
+        YouTubePlayTool(runtime),
         ObserveScreenTool(runtime),
         WaitForScreenChangeTool(runtime),
         TapElementTool(runtime),
@@ -35,6 +38,9 @@ object ComputerUseTools {
 }
 
 internal fun InstalledAppInfo.toJson(): JSONObject = JSONObject()
+    .put("display_name", appName)
+    .put("package_name", packageName)
+    .put("launchable", isLaunchable)
     .put("appName", appName)
     .put("packageName", packageName)
     .put("isLaunchable", isLaunchable)
@@ -95,7 +101,7 @@ class ListInstalledAppsTool(
     override val definition: ToolDefinition = ToolDefinition(
         id = "device.list_installed_apps",
         name = "list_installed_apps",
-        description = "List launchable Android applications installed on this device, optionally filtered by name or package keyword.",
+        description = "List launchable Android applications installed on this device, optionally filtered or paginated.",
         parameters = listOf(
             ToolParameter(
                 name = "query",
@@ -120,10 +126,16 @@ class ListInstalledAppsTool(
                 type = ToolParameterType.INTEGER,
                 description = "Maximum number of apps to return (1 to 150). Defaults to 50.",
                 required = false
+            ),
+            ToolParameter(
+                name = "offset",
+                type = ToolParameterType.INTEGER,
+                description = "Zero-based pagination offset into discovered apps. Defaults to 0.",
+                required = false
             )
         ),
         riskCategory = ToolRiskCategory.READ_ONLY,
-        resultSchemaDescription = "JSON object with totalDiscovered, count, visibilityNotice, and apps array [{appName, packageName, launcherActivity, isLaunchable, isSystemApp}].",
+        resultSchemaDescription = "JSON object with totalDiscovered, count, offset, hasMore, nextOffset, visibilityNotice, and apps array.",
         timeoutMillis = 8_000L,
         isImplemented = true
     )
@@ -133,6 +145,12 @@ class ListInstalledAppsTool(
             val raw = args.opt("limit")
             if (raw !is Number || raw.toInt() !in 1..150) {
                 return "Parameter 'limit' must be an integer between 1 and 150."
+            }
+        }
+        if (args.has("offset") && !args.isNull("offset")) {
+            val raw = args.opt("offset")
+            if (raw !is Number || raw.toInt() < 0) {
+                return "Parameter 'offset' must be a non-negative integer."
             }
         }
         return null
@@ -152,18 +170,23 @@ class ListInstalledAppsTool(
             args.optBoolean("include_non_launchable", false)
         } else false
         val limit = args.optInt("limit", 50).coerceIn(1, 150)
+        val offset = args.optInt("offset", 0).coerceAtLeast(0)
 
         val batch = runtime.listInstalledApps(
             query = query,
             includeSystemApps = includeSystem,
             limit = limit,
-            includeNonLaunchable = includeNonLaunchable
+            includeNonLaunchable = includeNonLaunchable,
+            offset = offset
         )
         val arr = JSONArray()
         batch.apps.forEach { arr.put(it.toJson()) }
         val json = JSONObject()
             .put("totalDiscovered", batch.totalDiscovered)
             .put("count", batch.apps.size)
+            .put("offset", batch.offset)
+            .put("hasMore", batch.hasMore)
+            .put("nextOffset", batch.nextOffset ?: JSONObject.NULL)
             .put("visibilityNotice", batch.visibilityNotice)
             .put("apps", arr)
         return ToolExecutionOutput(
@@ -181,7 +204,7 @@ class FindAppTool(
     override val definition: ToolDefinition = ToolDefinition(
         id = "device.find_app",
         name = "find_app",
-        description = "Check whether a specific Android application is installed and launchable by app name or package identifier.",
+        description = "Check whether a specific Android application is installed and launchable by display name or package identifier.",
         parameters = listOf(
             ToolParameter(
                 name = "query",
@@ -191,7 +214,7 @@ class FindAppTool(
             )
         ),
         riskCategory = ToolRiskCategory.READ_ONLY,
-        resultSchemaDescription = "JSON object with found (boolean), launchable (boolean), app, alternatives, and reason.",
+        resultSchemaDescription = "JSON object with status (FOUND/AMBIGUOUS/NOT_LAUNCHABLE/NOT_FOUND), display_name, package_name, launchable, app, and candidates.",
         timeoutMillis = 6_000L,
         isImplemented = true
     )
@@ -215,8 +238,11 @@ class FindAppTool(
                     outcome.alternatives.forEach { put(it.toJson()) }
                 }
                 val json = JSONObject()
+                    .put("status", "FOUND")
                     .put("found", true)
-                    .put("launchable", true)
+                    .put("display_name", outcome.app.appName)
+                    .put("package_name", outcome.app.packageName)
+                    .put("launchable", outcome.app.isLaunchable)
                     .put("app", outcome.app.toJson())
                     .put("alternatives", altArr)
                 ToolExecutionOutput(
@@ -224,10 +250,33 @@ class FindAppTool(
                     displaySummary = "Found ${outcome.app.appName} (${outcome.app.packageName})"
                 )
             }
+            is AppLookupOutcome.Ambiguous -> {
+                val candArr = JSONArray().apply {
+                    outcome.candidates.forEach { put(it.toJson()) }
+                }
+                val json = JSONObject()
+                    .put("status", "AMBIGUOUS")
+                    .put("found", true)
+                    .put("launchable", true)
+                    .put("query", outcome.query)
+                    .put("requires_user_action", true)
+                    .put("recovery_action", "SELECT_AMBIGUOUS_APP")
+                    .put("candidates", candArr)
+                    .put("reason", outcome.reason)
+                ToolExecutionOutput(
+                    outputJson = json,
+                    displaySummary = outcome.reason,
+                    isError = true,
+                    errorMessage = outcome.reason
+                )
+            }
             is AppLookupOutcome.NotLaunchable -> {
                 val json = JSONObject()
+                    .put("status", "NOT_LAUNCHABLE")
                     .put("found", true)
                     .put("launchable", false)
+                    .put("display_name", outcome.appName)
+                    .put("package_name", outcome.packageName)
                     .put("appName", outcome.appName)
                     .put("packageName", outcome.packageName)
                     .put("reason", outcome.reason)
@@ -240,6 +289,7 @@ class FindAppTool(
             }
             is AppLookupOutcome.NotFound -> {
                 val json = JSONObject()
+                    .put("status", "NOT_FOUND")
                     .put("found", false)
                     .put("launchable", false)
                     .put("query", outcome.query)
@@ -264,7 +314,7 @@ class LaunchAppTool(
     override val definition: ToolDefinition = ToolDefinition(
         id = "device.launch_app",
         name = "launch_app",
-        description = "Launch an installed Android application using its launcher intent and verify foreground window when Accessibility is enabled.",
+        description = "Launch an installed Android application using its launcher intent and verify actual foreground package or detect blockers such as AppLock.",
         parameters = listOf(
             ToolParameter(
                 name = "app",
@@ -274,7 +324,7 @@ class LaunchAppTool(
             )
         ),
         riskCategory = ToolRiskCategory.REVERSIBLE,
-        resultSchemaDescription = "JSON object with success, appName, packageName, launchIntentDispatched, foregroundVerified, observedForegroundPackage, and message.",
+        resultSchemaDescription = "JSON object with status (FOREGROUND_VERIFIED/LAUNCH_DISPATCHED/BLOCKED_BY_APPLOCK/BLOCKED_BY_DIALOG/APP_LOADING/NOT_FOUND/NOT_LAUNCHABLE/LAUNCH_FAILED), target_package, foreground_package, requires_user_action, recovery_action, and message.",
         timeoutMillis = 10_000L,
         isImplemented = true
     )
@@ -293,20 +343,130 @@ class LaunchAppTool(
     override suspend fun execute(args: JSONObject): ToolExecutionOutput {
         val appQuery = args.getString("app").trim()
         val outcome = runtime.launchApp(appQuery)
-        val json = JSONObject()
-            .put("success", outcome.success)
-            .put("packageName", outcome.packageName)
-            .put("launchIntentDispatched", outcome.launchIntentDispatched)
-            .put("foregroundVerified", outcome.foregroundVerified)
-            .put("message", outcome.message)
-        outcome.appName?.let { json.put("appName", it) }
-        outcome.observedForegroundPackage?.let { json.put("observedForegroundPackage", it) }
-        outcome.errorCode?.let { json.put("errorCode", it) }
+        val json = runtime.formatLaunchOutcomeJson(outcome)
         return ToolExecutionOutput(
             outputJson = json,
             displaySummary = outcome.message,
             isError = !outcome.success,
             errorMessage = if (outcome.success) null else outcome.message
+        )
+    }
+}
+
+class OpenUrlTool(
+    private val runtime: AndroidActionRuntime
+) : ExecutableTool {
+    override val requiredCapability: DeviceCapabilityType = DeviceCapabilityType.APP_LAUNCHING
+
+    override val definition: ToolDefinition = ToolDefinition(
+        id = "device.open_url",
+        name = "open_url",
+        description = "Open an http or https URL directly via Android ACTION_VIEW and verify the foreground window.",
+        parameters = listOf(
+            ToolParameter(
+                name = "url",
+                type = ToolParameterType.STRING,
+                description = "Complete http:// or https:// URL to open.",
+                required = true
+            )
+        ),
+        riskCategory = ToolRiskCategory.REVERSIBLE,
+        resultSchemaDescription = "Action outcome JSON with opened URL, afterPackage, screenChanged, and updated screen observation.",
+        timeoutMillis = 10_000L,
+        isImplemented = true
+    )
+
+    override fun validateArguments(args: JSONObject): String? {
+        val raw = args.opt("url")
+        if (raw !is String || raw.isBlank()) {
+            return "Missing required non-empty string parameter 'url'."
+        }
+        val clean = raw.trim().lowercase()
+        if (!clean.startsWith("http://") && !clean.startsWith("https://")) {
+            return "Parameter 'url' must begin with 'http://' or 'https://'."
+        }
+        return null
+    }
+
+    override fun describeAction(args: JSONObject): String =
+        "Open URL '${args.optString("url").trim().take(60)}'"
+
+    override suspend fun execute(args: JSONObject): ToolExecutionOutput =
+        runtime.openUrl(args.getString("url").trim()).toToolOutput(runtime)
+}
+
+class YouTubePlayTool(
+    private val runtime: AndroidActionRuntime
+) : ExecutableTool {
+    override val requiredCapability: DeviceCapabilityType = DeviceCapabilityType.APP_LAUNCHING
+
+    override val definition: ToolDefinition = ToolDefinition(
+        id = "media.play_on_youtube",
+        name = "play_on_youtube",
+        description = "Open YouTube search directly for the user's query, select a grounded matching video result when Accessibility is active, and verify real playback signals.",
+        parameters = listOf(
+            ToolParameter(
+                name = "query",
+                type = ToolParameterType.STRING,
+                description = "Video, artist, or topic search query to play on YouTube.",
+                required = true
+            )
+        ),
+        riskCategory = ToolRiskCategory.REVERSIBLE,
+        resultSchemaDescription = "JSON object with status (PLAYBACK_STARTED/PLAYBACK_UNVERIFIED/VIDEO_SELECTED/RESULTS_OBSERVED/SEARCH_OPENED/BLOCKED_BY_APPLOCK/FAILED), query, searchUrl, target_package, foreground_package, selected_title, playback_signal, and message.",
+        timeoutMillis = 12_000L,
+        isImplemented = true
+    )
+
+    override fun validateArguments(args: JSONObject): String? {
+        val q = args.opt("query")
+        if (q !is String || q.isBlank()) {
+            return "Missing required non-empty string parameter 'query'."
+        }
+        return null
+    }
+
+    override fun describeAction(args: JSONObject): String =
+        "Play on YouTube: '${args.optString("query").trim()}'"
+
+    override suspend fun execute(args: JSONObject): ToolExecutionOutput {
+        val query = args.getString("query").trim()
+        val outcome = runtime.playOnYouTube(query)
+        val json = JSONObject()
+            .put("status", outcome.status.name)
+            .put("query", outcome.query)
+            .put("searchUrl", outcome.searchUrl)
+            .put("message", outcome.message)
+        outcome.targetPackage?.let {
+            json.put("target_package", it)
+            json.put("packageName", it)
+        }
+        outcome.observedForegroundPackage?.let {
+            json.put("foreground_package", it)
+            json.put("observedForegroundPackage", it)
+        }
+        outcome.selectedTitle?.let { json.put("selected_title", it) }
+        outcome.selectedChannel?.let { json.put("selected_channel", it) }
+        outcome.playbackSignal?.let { json.put("playback_signal", it) }
+        if (outcome.status == YouTubePlayStatus.BLOCKED_BY_APPLOCK) {
+            val lo = outcome.launchOutcome
+            json.put("errorCode", "BLOCKED_BY_APPLOCK")
+            json.put("requires_user_action", true)
+            json.put("recovery_action", "WAIT_FOR_USER_UNLOCK")
+            json.put("appName", lo?.appName ?: "YouTube")
+            json.put("user_title", lo?.userTitle ?: "Unlock YouTube")
+            json.put("user_message", lo?.userMessage ?: outcome.message)
+            json.put("reason", lo?.blockerReason ?: "The target application is protected by Transsion AppLock.")
+        }
+        outcome.postObservation?.let { post ->
+            json.put("screen", runtime.screenObserver.toCompactJson(post))
+        }
+        val isErr = outcome.status == YouTubePlayStatus.FAILED || outcome.status == YouTubePlayStatus.BLOCKED_BY_APPLOCK
+        return ToolExecutionOutput(
+            outputJson = json,
+            displaySummary = outcome.message,
+            isError = isErr,
+            errorMessage = if (isErr) outcome.message else null
         )
     }
 }
@@ -585,7 +745,7 @@ class ScrollScreenTool(
     )
 
     override fun validateArguments(args: JSONObject): String? {
-        val dir = ScrollDirection.parse(args.optString("direction"))
+        ScrollDirection.parse(args.optString("direction"))
             ?: return "Parameter 'direction' must be one of: down, up, left, right."
         return null
     }

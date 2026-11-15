@@ -50,15 +50,7 @@ import com.example.ui.components.NexaSurfaceCard
 import com.example.ui.components.NoticeBanner
 import com.example.ui.components.SampleDataBadge
 import com.example.ui.components.TaskStatusPill
-import com.example.ui.theme.NexaBackground
-import com.example.ui.theme.NexaBorder
-import com.example.ui.theme.NexaBorderSubtle
-import com.example.ui.theme.NexaElevatedSurface
-import com.example.ui.theme.NexaOrange
-import com.example.ui.theme.NexaOrangeMuted
-import com.example.ui.theme.NexaSecondaryBackground
-import com.example.ui.theme.NexaTextPrimary
-import com.example.ui.theme.NexaTextSecondary
+import com.example.ui.theme.NexaTheme
 
 @Composable
 fun TasksScreen(
@@ -67,14 +59,15 @@ fun TasksScreen(
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val colors = NexaTheme.colors
 
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(NexaBackground)
+            .background(colors.background)
     ) {
         Surface(
-            color = NexaSecondaryBackground,
+            color = colors.secondaryBackground,
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.fillMaxWidth()) {
@@ -89,12 +82,16 @@ fun TasksScreen(
                         Text(
                             text = stringResource(R.string.tasks_title),
                             style = MaterialTheme.typography.headlineMedium,
-                            color = NexaTextPrimary
+                            color = colors.textPrimary
                         )
                         val liveActiveCount = state.allTasks.count {
                             !it.isSampleData && it.status in setOf(
                                 AgentTaskStatus.RUNNING,
                                 AgentTaskStatus.AWAITING_APPROVAL,
+                                AgentTaskStatus.WAITING_FOR_USER_UNLOCK,
+                                AgentTaskStatus.WAITING_FOR_PERMISSION,
+                                AgentTaskStatus.WAITING_FOR_EXTERNAL_APP,
+                                AgentTaskStatus.VERIFYING,
                                 AgentTaskStatus.PAUSED
                             )
                         }
@@ -105,7 +102,7 @@ fun TasksScreen(
                                 "Live execution queue ($liveActiveCount active)"
                             },
                             style = MaterialTheme.typography.bodySmall,
-                            color = NexaTextSecondary
+                            color = colors.textSecondary
                         )
                     }
                     FilterChip(
@@ -114,10 +111,10 @@ fun TasksScreen(
                         label = { Text("Sample Data") },
                         modifier = Modifier.testTag("tasks_sample_toggle"),
                         colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = NexaOrangeMuted,
-                            selectedLabelColor = NexaOrange,
-                            containerColor = NexaElevatedSurface,
-                            labelColor = NexaTextSecondary
+                            selectedContainerColor = colors.orangeMuted,
+                            selectedLabelColor = colors.orange,
+                            containerColor = colors.elevatedSurface,
+                            labelColor = colors.textSecondary
                         )
                     )
                 }
@@ -135,10 +132,10 @@ fun TasksScreen(
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(10.dp))
-                                .background(if (selected) NexaOrangeMuted else NexaElevatedSurface)
+                                .background(if (selected) colors.orangeMuted else colors.elevatedSurface)
                                 .border(
                                     1.dp,
-                                    if (selected) NexaOrange else NexaBorder,
+                                    if (selected) colors.orange else colors.border,
                                     RoundedCornerShape(10.dp)
                                 )
                                 .clickable { viewModel.selectTab(tab) }
@@ -148,7 +145,7 @@ fun TasksScreen(
                             Text(
                                 text = "${tab.label} ($count)",
                                 style = MaterialTheme.typography.labelMedium,
-                                color = if (selected) NexaOrange else NexaTextSecondary
+                                color = if (selected) colors.orange else colors.textSecondary
                             )
                         }
                     }
@@ -158,7 +155,7 @@ fun TasksScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(1.dp)
-                        .background(NexaBorderSubtle)
+                        .background(colors.borderSubtle)
                 )
             }
         }
@@ -183,10 +180,15 @@ fun TasksScreen(
                 item(key = "empty_tasks") {
                     val emptyIcon = when (state.selectedTab) {
                         AgentTaskStatus.RUNNING -> Icons.Outlined.PlayCircleOutline
-                        AgentTaskStatus.AWAITING_APPROVAL -> Icons.Outlined.HourglassTop
+                        AgentTaskStatus.AWAITING_APPROVAL,
+                        AgentTaskStatus.WAITING_FOR_USER_UNLOCK,
+                        AgentTaskStatus.WAITING_FOR_PERMISSION,
+                        AgentTaskStatus.WAITING_FOR_EXTERNAL_APP,
+                        AgentTaskStatus.VERIFYING,
                         AgentTaskStatus.PAUSED -> Icons.Outlined.HourglassTop
                         AgentTaskStatus.COMPLETED -> Icons.Outlined.AssignmentTurnedIn
-                        AgentTaskStatus.FAILED -> Icons.Outlined.ErrorOutline
+                        AgentTaskStatus.PARTIALLY_COMPLETED,
+                        AgentTaskStatus.FAILED,
                         AgentTaskStatus.CANCELLED -> Icons.Outlined.ErrorOutline
                     }
                     EmptyStateView(
@@ -216,9 +218,10 @@ private fun TaskListCard(
     task: AgentTask,
     onClick: () -> Unit
 ) {
+    val colors = NexaTheme.colors
     NexaSurfaceCard(
         onClick = onClick,
-        borderColor = NexaBorder,
+        borderColor = colors.border,
         modifier = Modifier.testTag("task_card_${task.id}")
     ) {
         Row(
@@ -235,13 +238,13 @@ private fun TaskListCard(
         Text(
             text = task.title,
             style = MaterialTheme.typography.titleMedium,
-            color = NexaTextPrimary
+            color = colors.textPrimary
         )
         Spacer(modifier = Modifier.height(4.dp))
         Text(
             text = task.prompt,
             style = MaterialTheme.typography.bodySmall,
-            color = NexaTextSecondary,
+            color = colors.textSecondary,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
@@ -254,12 +257,12 @@ private fun TaskListCard(
             Text(
                 text = listOfNotNull(task.targetApp, task.modelLabel).joinToString(" · "),
                 style = MaterialTheme.typography.labelSmall,
-                color = NexaTextSecondary
+                color = colors.textSecondary
             )
             Icon(
                 imageVector = Icons.Outlined.ChevronRight,
                 contentDescription = "Open task details",
-                tint = NexaTextSecondary,
+                tint = colors.textSecondary,
                 modifier = Modifier.size(18.dp)
             )
         }

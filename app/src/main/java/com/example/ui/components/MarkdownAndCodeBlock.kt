@@ -39,16 +39,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.example.ui.theme.JetBrainsMonoFamily
-import com.example.ui.theme.NexaBackground
-import com.example.ui.theme.NexaBorder
 import com.example.ui.theme.NexaCodeTextStyle
-import com.example.ui.theme.NexaElevatedSurface
-import com.example.ui.theme.NexaOrange
-import com.example.ui.theme.NexaSecondaryBackground
-import com.example.ui.theme.NexaSuccess
-import com.example.ui.theme.NexaTextPrimary
-import com.example.ui.theme.NexaTextSecondary
-import com.example.ui.theme.NexaTextTertiary
+import com.example.ui.theme.NexaTheme
 import kotlinx.coroutines.delay
 
 sealed interface MarkdownBlock {
@@ -136,14 +128,14 @@ fun MarkdownTextContent(
                             2 -> MaterialTheme.typography.titleMedium
                             else -> MaterialTheme.typography.titleSmall
                         },
-                        color = NexaTextPrimary
+                        color = NexaTheme.colors.textPrimary
                     )
                 }
                 is MarkdownBlock.Paragraph -> {
                     Text(
                         text = formatInlineMarkdown(block.text),
                         style = MaterialTheme.typography.bodyLarge,
-                        color = NexaTextPrimary
+                        color = NexaTheme.colors.textPrimary
                     )
                 }
                 is MarkdownBlock.Bullet -> {
@@ -154,13 +146,13 @@ fun MarkdownTextContent(
                         Text(
                             text = "•",
                             style = MaterialTheme.typography.bodyLarge,
-                            color = NexaOrange,
+                            color = NexaTheme.colors.orange,
                             modifier = Modifier.padding(end = 8.dp)
                         )
                         Text(
                             text = formatInlineMarkdown(block.text),
                             style = MaterialTheme.typography.bodyLarge,
-                            color = NexaTextPrimary,
+                            color = NexaTheme.colors.textPrimary,
                             modifier = Modifier.weight(1f)
                         )
                     }
@@ -186,6 +178,7 @@ fun CodeBlockCard(
 ) {
     val clipboard = LocalClipboardManager.current
     var copied by remember { mutableStateOf(false) }
+    val colors = NexaTheme.colors
 
     LaunchedEffect(copied) {
         if (copied) {
@@ -198,13 +191,13 @@ fun CodeBlockCard(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(NexaBackground)
-            .border(1.dp, NexaBorder, RoundedCornerShape(12.dp))
+            .background(colors.background)
+            .border(1.dp, colors.border, RoundedCornerShape(12.dp))
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(NexaSecondaryBackground)
+                .background(colors.secondaryBackground)
                 .padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
@@ -212,7 +205,7 @@ fun CodeBlockCard(
             Text(
                 text = language.uppercase(),
                 style = MaterialTheme.typography.labelSmall,
-                color = NexaTextSecondary
+                color = colors.textSecondary
             )
             IconButton(
                 onClick = {
@@ -224,7 +217,7 @@ fun CodeBlockCard(
                 Icon(
                     imageVector = if (copied) Icons.Outlined.Check else Icons.Outlined.ContentCopy,
                     contentDescription = "Copy code snippet",
-                    tint = if (copied) NexaSuccess else NexaTextSecondary,
+                    tint = if (copied) colors.success else colors.textSecondary,
                     modifier = Modifier.size(16.dp)
                 )
             }
@@ -243,14 +236,14 @@ fun CodeBlockCard(
                             Text(
                                 text = "${index + 1}".padStart(2, ' '),
                                 style = NexaCodeTextStyle,
-                                color = NexaTextTertiary
+                                color = colors.textTertiary
                             )
                             Spacer(modifier = Modifier.width(12.dp))
                         }
                         Text(
                             text = line.ifEmpty { " " },
                             style = NexaCodeTextStyle,
-                            color = NexaTextPrimary
+                            color = colors.textPrimary
                         )
                     }
                 }
@@ -261,6 +254,7 @@ fun CodeBlockCard(
 
 @Composable
 private fun formatInlineMarkdown(text: String): AnnotatedString {
+    val colors = NexaTheme.colors
     return buildAnnotatedString {
         var idx = 0
         while (idx < text.length) {
@@ -268,7 +262,7 @@ private fun formatInlineMarkdown(text: String): AnnotatedString {
                 text.startsWith("**", idx) -> {
                     val end = text.indexOf("**", idx + 2)
                     if (end != -1) {
-                        withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = NexaTextPrimary)) {
+                        withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = colors.textPrimary)) {
                             append(text.substring(idx + 2, end))
                         }
                         idx = end + 2
@@ -283,8 +277,8 @@ private fun formatInlineMarkdown(text: String): AnnotatedString {
                         withStyle(
                             SpanStyle(
                                 fontFamily = JetBrainsMonoFamily,
-                                background = NexaElevatedSurface,
-                                color = NexaOrange
+                                background = colors.elevatedSurface,
+                                color = colors.orange
                             )
                         ) {
                             append(" ${text.substring(idx + 1, end)} ")

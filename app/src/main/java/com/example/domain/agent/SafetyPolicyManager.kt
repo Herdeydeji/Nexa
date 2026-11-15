@@ -74,10 +74,15 @@ class DefaultSafetyPolicyManager : SafetyPolicyManager {
         }
 
         val sensitiveTargetMatch = detectSensitiveUiTarget(def.name, args)
-        val effectiveCategory = if (sensitiveTargetMatch != null) {
-            ToolRiskCategory.EXTERNAL_SIDE_EFFECT
+        val externalCommMatch = if (settings.requireApprovalForExternalComms) {
+            detectExternalCommunicationTarget(def.name, args)
         } else {
-            def.riskCategory
+            null
+        }
+        val effectiveCategory = when {
+            sensitiveTargetMatch != null -> ToolRiskCategory.EXTERNAL_SIDE_EFFECT
+            externalCommMatch != null -> ToolRiskCategory.EXTERNAL_SIDE_EFFECT
+            else -> def.riskCategory
         }
 
         val mustConfirm = when (effectiveCategory) {
@@ -96,10 +101,22 @@ class DefaultSafetyPolicyManager : SafetyPolicyManager {
             return ToolPolicyEvaluation.Allow
         }
 
-        val actionSummary = tool.describeAction(args)
+        val shouldRedactArgs = settings.redactSensitiveStepsInLogs && (
+            effectiveCategory == ToolRiskCategory.SENSITIVE ||
+                effectiveCategory == ToolRiskCategory.EXTERNAL_SIDE_EFFECT ||
+                def.name == "type_text"
+            )
+        val rawSummary = tool.describeAction(args)
+        val actionSummary = if (shouldRedactArgs && def.name == "type_text") {
+            "Type protected text input (details redacted by privacy policy)"
+        } else {
+            rawSummary
+        }
         val isReversible = effectiveCategory == ToolRiskCategory.READ_ONLY ||
             effectiveCategory == ToolRiskCategory.REVERSIBLE
         val approvalEffect = when {
+            externalCommMatch != null ->
+                "Enforced by Settings > Require confirmation for calls & SMS: targets '$externalCommMatch'."
             sensitiveTargetMatch != null ->
                 "Targets a potentially sensitive or irreversible UI action ('$sensitiveTargetMatch'). Requires explicit confirmation."
             effectiveCategory == ToolRiskCategory.READ_ONLY ->
@@ -113,13 +130,16 @@ class DefaultSafetyPolicyManager : SafetyPolicyManager {
             else ->
                 "Permits an external side-effect action via '${def.name}'."
         }
-        val reason = if (sensitiveTargetMatch != null) {
-            "'${def.name}' targets '$sensitiveTargetMatch', which may trigger a message, purchase, or deletion."
-        } else {
-            "${def.name} is classified as ${effectiveCategory.label} and requires explicit confirmation."
+        val reason = when {
+            externalCommMatch != null ->
+                "'${def.name}' targets '$externalCommMatch', which requires confirmation under external communications policy."
+            sensitiveTargetMatch != null ->
+                "'${def.name}' targets '$sensitiveTargetMatch', which may trigger a message, purchase, or deletion."
+            else ->
+                "${def.name} is classified as ${effectiveCategory.label} and requires explicit confirmation."
         }
 
-        val previewArgs = if (settings.redactSensitiveStepsInLogs && effectiveCategory == ToolRiskCategory.SENSITIVE) {
+        val previewArgs = if (shouldRedactArgs) {
             "[Redacted in preview logs]"
         } else {
             args.toString()
@@ -156,9 +176,47 @@ class DefaultSafetyPolicyManager : SafetyPolicyManager {
         return match?.value
     }
 
+    private fun detectExternalCommunicationTarget(toolName: String, args: JSONObject): String? {
+        if (toolName in setOf("comms.draft_sms", "comms.prepare_call")) {
+            return toolName
+        }
+        if (toolName == "open_url") {
+            val url = args.optString("url").trim().lowercase()
+            if (url.startsWith("tel:") || url.startsWith("sms:") || url.startsWith("smsto:") || url.startsWith("mailto:")) {
+                return url.substringBefore(":")
+            }
+        }
+        if (toolName == "launch_app") {
+            val app = args.optString("app").ifBlank { args.optString("app_name") }.trim()
+            if (EXTERNAL_COMMS_APP_REGEX.containsMatchIn(app)) {
+                return app
+            }
+        }
+        if (toolName in setOf("tap_element", "long_press_element", "type_text")) {
+            val fields = listOf(
+                args.optString("text"),
+                args.optString("content_description"),
+                args.optString("view_id"),
+                args.optString("hint_or_label")
+            ).joinToString(" ").trim()
+            if (fields.isNotEmpty()) {
+                return EXTERNAL_COMMS_UI_REGEX.find(fields)?.value
+            }
+        }
+        return null
+    }
+
     companion object {
         private val SENSITIVE_UI_TARGET_REGEX = Regex(
             pattern = """\b(pay|buy|purchase|checkout|place\s+order|confirm\s+payment|transfer|send\s+money|send\s+message|send\s+sms|delete|erase|remove\s+account|uninstall|call\s+now)\b""",
+            option = RegexOption.IGNORE_CASE
+        )
+        private val EXTERNAL_COMMS_UI_REGEX = Regex(
+            pattern = """\b(send|reply|forward\s+message|dial|place\s+call|voice\s+call|video\s+call|send\s+email|compose\s+sms)\b""",
+            option = RegexOption.IGNORE_CASE
+        )
+        private val EXTERNAL_COMMS_APP_REGEX = Regex(
+            pattern = """\b(dialer|phone|messages|sms|whatsapp|telegram|signal)\b""",
             option = RegexOption.IGNORE_CASE
         )
     }

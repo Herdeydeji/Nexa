@@ -21,6 +21,12 @@ data class InteractionDispatchResult(
     val staleNodeRefreshed: Boolean = false
 )
 
+sealed interface TargetResolutionOutcome {
+    data class Resolved(val node: ObservedUiNode) : TargetResolutionOutcome
+    data class Ambiguous(val candidates: List<ObservedUiNode>, val reason: String) : TargetResolutionOutcome
+    data class NotFound(val reason: String) : TargetResolutionOutcome
+}
+
 interface InteractionBackend {
     suspend fun tapElement(spec: TargetResolutionSpec, cachedObservation: ScreenObservation): InteractionDispatchResult
     suspend fun longPressElement(spec: TargetResolutionSpec, cachedObservation: ScreenObservation): InteractionDispatchResult
@@ -45,6 +51,9 @@ class LiveAccessibilityInteractionBackend(
             ?: return InteractionDispatchResult(false, "Accessibility service is not connected.", errorCode = "SERVICE_DISCONNECTED")
 
         return executeWithStaleRefresh(service, spec, cachedObservation) { node, matched ->
+            if (!node.isEnabled) {
+                return@executeWithStaleRefresh false to "Target ${describeNode(matched)} is currently disabled."
+            }
             val targetNode = findClickableNodeOrAncestor(node)
             val nodeClicked = targetNode?.let {
                 runCatching { it.performAction(AccessibilityNodeInfo.ACTION_CLICK) }.getOrDefault(false)
@@ -129,6 +138,14 @@ class LiveAccessibilityInteractionBackend(
             val editableNode = findEditableNode(node)
                 ?: return@executeWithStaleRefresh false to "Resolved ${describeNode(matched)}, which is not an editable text field."
 
+            if (!editableNode.isEnabled) {
+                return@executeWithStaleRefresh false to "Editable field ${describeNode(matched)} is currently disabled."
+            }
+
+            val actions = runCatching { editableNode.actionList }.getOrNull().orEmpty()
+            val explicitlyLacksSetText = actions.isNotEmpty() &&
+                actions.none { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }
+
             runCatching { editableNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS) }
             runCatching { editableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK) }
             delay(120)
@@ -143,6 +160,8 @@ class LiveAccessibilityInteractionBackend(
             if (ok) {
                 val safeShown = if (matched.isSensitiveRedacted || matched.isPassword) "[REDACTED_SENSITIVE]" else "'$text'"
                 true to "Entered $safeShown into ${describeNode(matched)}."
+            } else if (explicitlyLacksSetText) {
+                false to "Editable node ${describeNode(matched)} does not advertise ACTION_SET_TEXT on this screen."
             } else {
                 false to "ACTION_SET_TEXT failed on ${describeNode(matched)}."
             }
@@ -268,44 +287,56 @@ class LiveAccessibilityInteractionBackend(
                 refreshed = true
                 inspector.inspect(root, root.packageName?.toString(), null)
             }
-            val matchedDto = AccessibilityInteractionController.resolveTargetNode(obs, spec, preferEditable)
-            if (matchedDto == null) {
-                if (attempt == 0) {
-                    delay(150)
-                    continue
+            when (val resolution = AccessibilityInteractionController.resolveTargetNodeChecked(obs, spec, preferEditable)) {
+                is TargetResolutionOutcome.NotFound -> {
+                    if (attempt == 0) {
+                        delay(150)
+                        continue
+                    }
+                    return InteractionDispatchResult(
+                        executed = false,
+                        detail = "No UI element matched ${describeSpec(spec)}.",
+                        errorCode = "TARGET_NOT_FOUND",
+                        staleNodeRefreshed = refreshed
+                    )
                 }
-                return InteractionDispatchResult(
-                    executed = false,
-                    detail = "No UI element matched ${describeSpec(spec)}.",
-                    errorCode = "TARGET_NOT_FOUND",
-                    staleNodeRefreshed = refreshed
-                )
-            }
-            val liveNode = findLiveNodeMatching(root, matchedDto)
-            if (liveNode == null) {
-                if (attempt == 0) {
-                    delay(150)
-                    continue
+                is TargetResolutionOutcome.Ambiguous -> {
+                    return InteractionDispatchResult(
+                        executed = false,
+                        detail = resolution.reason,
+                        errorCode = "AMBIGUOUS_TARGET",
+                        staleNodeRefreshed = refreshed
+                    )
                 }
-                return InteractionDispatchResult(
-                    executed = false,
-                    detail = "Matched ${describeNode(matchedDto)} in snapshot, but live accessibility node became stale.",
-                    resolvedTargetLabel = describeNode(matchedDto),
-                    errorCode = "STALE_NODE",
-                    staleNodeRefreshed = refreshed
-                )
+                is TargetResolutionOutcome.Resolved -> {
+                    val matchedDto = resolution.node
+                    val liveNode = findLiveNodeMatching(root, matchedDto)
+                    if (liveNode == null) {
+                        if (attempt == 0) {
+                            delay(150)
+                            continue
+                        }
+                        return InteractionDispatchResult(
+                            executed = false,
+                            detail = "Matched ${describeNode(matchedDto)} in snapshot, but live accessibility node became stale.",
+                            resolvedTargetLabel = describeNode(matchedDto),
+                            errorCode = "STALE_NODE",
+                            staleNodeRefreshed = refreshed
+                        )
+                    }
+                    val (ok, msg) = block(liveNode, matchedDto)
+                    if (ok || attempt == 1) {
+                        return InteractionDispatchResult(
+                            executed = ok,
+                            detail = msg,
+                            resolvedTargetLabel = describeNode(matchedDto),
+                            errorCode = if (ok) null else "ACTION_FAILED",
+                            staleNodeRefreshed = refreshed
+                        )
+                    }
+                    delay(150)
+                }
             }
-            val (ok, msg) = block(liveNode, matchedDto)
-            if (ok || attempt == 1) {
-                return InteractionDispatchResult(
-                    executed = ok,
-                    detail = msg,
-                    resolvedTargetLabel = describeNode(matchedDto),
-                    errorCode = if (ok) null else "ACTION_FAILED",
-                    staleNodeRefreshed = refreshed
-                )
-            }
-            delay(150)
         }
         return InteractionDispatchResult(false, "Interaction failed after stale-node refresh.", errorCode = "ACTION_FAILED", staleNodeRefreshed = true)
     }
@@ -321,7 +352,6 @@ class LiveAccessibilityInteractionBackend(
             val rect = Rect().also { runCatching { current.getBoundsInScreen(it) } }
             val currentId = runCatching { current.viewIdResourceName?.substringAfterLast('/') }.getOrNull()
             val currentText = runCatching { current.text?.toString()?.trim() }.getOrNull()
-            val currentDesc = runCatching { current.contentDescription?.toString()?.trim() }.getOrNull()
 
             val sameBounds = rect.left == target.bounds.left &&
                 rect.top == target.bounds.top &&
@@ -346,22 +376,22 @@ class LiveAccessibilityInteractionBackend(
         var cur: AccessibilityNodeInfo? = node
         var hops = 0
         while (cur != null && hops < 5) {
-            if (cur.isClickable) return cur
+            if (cur.isClickable && cur.isEnabled) return cur
             cur = runCatching { cur.parent }.getOrNull()
             hops++
         }
-        return if (node.isClickable) node else null
+        return if (node.isClickable && node.isEnabled) node else null
     }
 
     private fun findLongClickableNodeOrAncestor(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         var cur: AccessibilityNodeInfo? = node
         var hops = 0
         while (cur != null && hops < 5) {
-            if (cur.isLongClickable) return cur
+            if (cur.isLongClickable && cur.isEnabled) return cur
             cur = runCatching { cur.parent }.getOrNull()
             hops++
         }
-        return if (node.isLongClickable) node else null
+        return if (node.isLongClickable && node.isEnabled) node else null
     }
 
     private fun findEditableNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -428,7 +458,7 @@ class LiveAccessibilityInteractionBackend(
         while (queue.isNotEmpty() && visited < 160) {
             val cur = queue.removeFirst()
             visited++
-            if (cur.isClickable && !cur.isEditable) {
+            if (cur.isClickable && cur.isEnabled && !cur.isEditable) {
                 val label = listOfNotNull(
                     cur.text?.toString(),
                     cur.contentDescription?.toString(),
@@ -495,50 +525,122 @@ open class AccessibilityInteractionController(
             observation: ScreenObservation,
             spec: TargetResolutionSpec,
             preferEditable: Boolean = false
-        ): ObservedUiNode? {
-            val nodes = observation.nodes
-            if (nodes.isEmpty()) return null
+        ): ObservedUiNode? = when (val outcome = resolveTargetNodeChecked(observation, spec, preferEditable)) {
+            is TargetResolutionOutcome.Resolved -> outcome.node
+            is TargetResolutionOutcome.Ambiguous -> null
+            is TargetResolutionOutcome.NotFound -> null
+        }
 
-            spec.nodeIndex?.let { idx ->
-                val byIndex = nodes.firstOrNull { it.index == idx }
-                if (byIndex != null) return byIndex
+        fun resolveTargetNodeChecked(
+            observation: ScreenObservation,
+            spec: TargetResolutionSpec,
+            preferEditable: Boolean = false
+        ): TargetResolutionOutcome {
+            val rawNodes = observation.nodes
+            if (rawNodes.isEmpty()) {
+                return TargetResolutionOutcome.NotFound("No UI nodes observed on screen.")
             }
+
+            // Explicit nodeIndex resolves unambiguously when present
+            spec.nodeIndex?.let { idx ->
+                val byIndex = rawNodes.firstOrNull { it.index == idx }
+                if (byIndex != null) return TargetResolutionOutcome.Resolved(byIndex)
+            }
+
+            val interactiveNodes = rawNodes.filter {
+                it.enabled && (it.bounds.width > 0 || it.bounds.height > 0 || it.editable || it.clickable)
+            }.ifEmpty { rawNodes.filter { it.enabled } }.ifEmpty { rawNodes }
 
             val candidates = if (preferEditable || spec.editableOnly) {
-                nodes.filter { it.editable || it.role.contains("Field", ignoreCase = true) }
-                    .ifEmpty { nodes }
+                interactiveNodes.filter { it.editable || it.role.contains("Field", ignoreCase = true) }
+                    .ifEmpty { interactiveNodes }
             } else {
-                nodes
+                interactiveNodes
             }
 
-            spec.viewId?.trim()?.takeIf { it.isNotEmpty() }?.let { vid ->
+            // Priority 1: View ID
+            spec.viewId?.let(::norm)?.takeIf { it.isNotEmpty() }?.let { vid ->
                 val cleanVid = vid.substringAfterLast('/')
-                candidates.firstOrNull { it.viewId.equals(cleanVid, ignoreCase = true) }?.let { return it }
-                candidates.firstOrNull { it.viewId?.contains(cleanVid, ignoreCase = true) == true }?.let { return it }
+                val exactId = candidates.filter { normOrNull(it.viewId?.substringAfterLast('/')) == cleanVid }
+                pickUniqueOrAmbiguous(exactId, "view_id='$vid'")?.let { return it }
+                val partialId = candidates.filter { normOrNull(it.viewId)?.contains(cleanVid) == true }
+                pickUniqueOrAmbiguous(partialId, "view_id~='$vid'")?.let { return it }
             }
 
-            spec.text?.trim()?.takeIf { it.isNotEmpty() }?.let { q ->
-                candidates.firstOrNull { it.text.equals(q, ignoreCase = true) }?.let { return it }
-                candidates.firstOrNull { it.hintText.equals(q, ignoreCase = true) }?.let { return it }
-                candidates.firstOrNull { it.text?.contains(q, ignoreCase = true) == true }?.let { return it }
-                candidates.firstOrNull { it.hintText?.contains(q, ignoreCase = true) == true }?.let { return it }
-                candidates.firstOrNull { it.contentDescription?.contains(q, ignoreCase = true) == true }?.let { return it }
+            // Priority 2: Exact contentDescription
+            spec.contentDescription?.let(::norm)?.takeIf { it.isNotEmpty() }?.let { q ->
+                val exactDesc = candidates.filter { normOrNull(it.contentDescription) == q }
+                pickUniqueOrAmbiguous(exactDesc, "content_description='$q'")?.let { return it }
             }
 
-            spec.contentDescription?.trim()?.takeIf { it.isNotEmpty() }?.let { q ->
-                candidates.firstOrNull { it.contentDescription.equals(q, ignoreCase = true) }?.let { return it }
-                candidates.firstOrNull { it.contentDescription?.contains(q, ignoreCase = true) == true }?.let { return it }
+            // Priority 3: Exact visible text / hint
+            spec.text?.let(::norm)?.takeIf { it.isNotEmpty() }?.let { q ->
+                val exactText = candidates.filter { normOrNull(it.text) == q || normOrNull(it.hintText) == q }
+                pickUniqueOrAmbiguous(exactText, "text='$q'")?.let { return it }
+
+                val exactDescFallback = candidates.filter { normOrNull(it.contentDescription) == q }
+                pickUniqueOrAmbiguous(exactDescFallback, "text/desc='$q'")?.let { return it }
             }
 
-            spec.role?.trim()?.takeIf { it.isNotEmpty() }?.let { r ->
-                candidates.firstOrNull { it.role.equals(r, ignoreCase = true) }?.let { return it }
+            // Priority 4: Partial text / hint / contentDescription
+            spec.text?.let(::norm)?.takeIf { it.isNotEmpty() }?.let { q ->
+                val partialText = candidates.filter {
+                    normOrNull(it.text)?.contains(q) == true ||
+                        normOrNull(it.hintText)?.contains(q) == true
+                }
+                pickUniqueOrAmbiguous(partialText, "partial text '$q'")?.let { return it }
+
+                val partialDesc = candidates.filter { normOrNull(it.contentDescription)?.contains(q) == true }
+                pickUniqueOrAmbiguous(partialDesc, "partial desc '$q'")?.let { return it }
+            }
+
+            spec.contentDescription?.let(::norm)?.takeIf { it.isNotEmpty() }?.let { q ->
+                val partialDesc = candidates.filter { normOrNull(it.contentDescription)?.contains(q) == true }
+                pickUniqueOrAmbiguous(partialDesc, "partial content_description '$q'")?.let { return it }
+            }
+
+            // Priority 5: Role + structural context
+            spec.role?.let(::norm)?.takeIf { it.isNotEmpty() }?.let { r ->
+                val roleMatches = candidates.filter { normOrNull(it.role) == r }
+                pickUniqueOrAmbiguous(roleMatches, "role='$r'")?.let { return it }
             }
 
             if (preferEditable || spec.editableOnly) {
-                return candidates.firstOrNull { it.focused } ?: candidates.firstOrNull { it.editable }
+                val focusedOrEditable = candidates.firstOrNull { it.focused && it.editable }
+                    ?: candidates.firstOrNull { it.editable }
+                if (focusedOrEditable != null) {
+                    return TargetResolutionOutcome.Resolved(focusedOrEditable)
+                }
             }
 
-            return null
+            return TargetResolutionOutcome.NotFound("No matching enabled UI element found.")
         }
+
+        private fun pickUniqueOrAmbiguous(
+            matches: List<ObservedUiNode>,
+            selectorDesc: String
+        ): TargetResolutionOutcome? {
+            if (matches.isEmpty()) return null
+            if (matches.size == 1) return TargetResolutionOutcome.Resolved(matches.first())
+
+            // Prefer clickable or editable nodes if only one is interactive
+            val actionable = matches.filter { it.clickable || it.editable }
+            if (actionable.size == 1) {
+                return TargetResolutionOutcome.Resolved(actionable.first())
+            }
+            val pool = actionable.ifEmpty { matches }
+            // Check if all tied items are identical nested duplicates or genuinely distinct targets
+            val distinctTexts = pool.map { "${normOrNull(it.text)}|${normOrNull(it.contentDescription)}|${it.viewId}" }.toSet()
+            return TargetResolutionOutcome.Ambiguous(
+                candidates = pool.take(5),
+                reason = "Ambiguous UI target for $selectorDesc: ${pool.size} matching nodes (${distinctTexts.size} distinct). Specify node_index or view_id."
+            )
+        }
+
+        private fun norm(value: String): String =
+            value.trim().replace(Regex("\\s+"), " ").lowercase()
+
+        private fun normOrNull(value: String?): String? =
+            value?.let(::norm)?.takeIf { it.isNotEmpty() }
     }
 }

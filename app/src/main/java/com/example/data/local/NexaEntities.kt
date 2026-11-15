@@ -10,6 +10,7 @@ import com.example.domain.model.ExecutionPlan
 import com.example.domain.model.ExecutionStepState
 import com.example.domain.model.MessageRole
 import com.example.domain.model.MessageStatus
+import com.example.domain.model.ResumableTaskSnapshot
 import com.example.domain.model.StepKind
 import com.example.domain.model.TaskSummary
 import com.example.domain.model.TaskVerificationSummary
@@ -25,7 +26,9 @@ data class ConversationEntity(
     val isSamplePreview: Boolean,
     val createdAtMillis: Long,
     val updatedAtMillis: Long,
-    val lastMessagePreview: String
+    val lastMessagePreview: String,
+    val preferredProviderId: String? = null,
+    val preferredModelId: String? = null
 )
 
 @Entity(
@@ -78,7 +81,8 @@ data class AgentTaskEntity(
     val createdAtMillis: Long,
     val updatedAtMillis: Long,
     val summaryMessage: String? = null,
-    val verificationJson: String? = null
+    val verificationJson: String? = null,
+    val resumableSnapshotJson: String? = null
 )
 
 @Entity(
@@ -113,6 +117,7 @@ class NexaTypeConverters {
     private val planAdapter = moshi.adapter(ExecutionPlan::class.java)
     private val summaryAdapter = moshi.adapter(TaskSummary::class.java)
     private val verificationAdapter = moshi.adapter(TaskVerificationSummary::class.java)
+    private val resumableSnapshotAdapter = moshi.adapter(ResumableTaskSnapshot::class.java)
     private val stringListAdapter = moshi.adapter<List<String>>(
         Types.newParameterizedType(List::class.java, String::class.java)
     )
@@ -168,6 +173,12 @@ class NexaTypeConverters {
 
     fun decodeVerificationSummary(json: String?): TaskVerificationSummary? =
         json?.let { runCatching { verificationAdapter.fromJson(it) }.getOrNull() }
+
+    fun encodeResumableSnapshot(snapshot: ResumableTaskSnapshot?): String? =
+        snapshot?.let { resumableSnapshotAdapter.toJson(it) }
+
+    fun decodeResumableSnapshot(json: String?): ResumableTaskSnapshot? =
+        json?.let { runCatching { resumableSnapshotAdapter.fromJson(it) }.getOrNull() }
 
     fun encodeToolCalls(calls: List<ToolCall>): String? =
         if (calls.isEmpty()) null else toolCallListAdapter.toJson(calls)

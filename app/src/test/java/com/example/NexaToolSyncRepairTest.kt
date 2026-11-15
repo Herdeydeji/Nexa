@@ -336,6 +336,8 @@ class NexaToolSyncRepairTest {
             "list_installed_apps",
             "find_app",
             "launch_app",
+            "open_url",
+            "play_on_youtube",
             "observe_screen",
             "wait_for_screen_change",
             "tap_element",
@@ -369,11 +371,20 @@ class NexaToolSyncRepairTest {
         val registry = DefaultToolRegistry(context = context, actionRuntime = runtime)
         val inspector = AndroidCapabilityInspector(context, perm)
 
-        // 1. Accessibility disabled, MediaProjection not granted -> 6 native tools available
+        // 1. Accessibility disabled, MediaProjection not granted -> 8 native tools available (3 utility + 5 app/url/YouTube tools)
         val caps1 = inspector.inspectAll(emptyMap())
         val available1 = registry.getAvailableTools(caps1).map { it.definition.name }.toSet()
         assertEquals(
-            setOf("calculator", "get_current_datetime", "get_device_info", "list_installed_apps", "find_app", "launch_app"),
+            setOf(
+                "calculator",
+                "get_current_datetime",
+                "get_device_info",
+                "list_installed_apps",
+                "find_app",
+                "launch_app",
+                "open_url",
+                "play_on_youtube"
+            ),
             available1
         )
         val observeEntry1 = registry.getAllRegisteredTools(caps1).first { it.definition.name == "observe_screen" }
@@ -390,7 +401,7 @@ class NexaToolSyncRepairTest {
         val tapEntry2 = registry.getAllRegisteredTools(caps2).first { it.definition.name == "tap_element" }
         assertEquals(ToolAvailabilityStatus.TEMPORARILY_UNAVAILABLE, tapEntry2.availabilityStatus)
 
-        // 3. Accessibility connected & MediaProjection active -> all 17 tools AVAILABLE
+        // 3. Accessibility connected & MediaProjection active -> all 19 tools AVAILABLE
         perm.accState = AccessibilityRuntimeState.SERVICE_ENABLED
         perm.projState = MediaProjectionConsentState.GRANTED_ACTIVE
         screenshotBackend.setSnapshot(
@@ -402,7 +413,7 @@ class NexaToolSyncRepairTest {
             )
         )
         val caps3 = inspector.inspectAll(emptyMap())
-        assertEquals(17, registry.getAvailableTools(caps3).size)
+        assertEquals(19, registry.getAvailableTools(caps3).size)
 
         // 4. Runtime execution gate blocks unconsented tool calls deterministically
         perm.accState = AccessibilityRuntimeState.SERVICE_DISABLED
@@ -624,7 +635,16 @@ class NexaToolSyncRepairTest {
             toolsArr.getJSONObject(it).getJSONObject("function").getString("name")
         }.toSet()
         assertEquals(
-            setOf("calculator", "get_current_datetime", "get_device_info", "list_installed_apps", "find_app", "launch_app"),
+            setOf(
+                "calculator",
+                "get_current_datetime",
+                "get_device_info",
+                "list_installed_apps",
+                "find_app",
+                "launch_app",
+                "open_url",
+                "play_on_youtube"
+            ),
             serializedToolNames
         )
 
@@ -959,7 +979,7 @@ class NexaToolSyncRepairTest {
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("accessibility_setup_card").assertIsDisplayed()
         composeRule.onNodeWithText("Enabled, not connected").assertIsDisplayed()
-        composeRule.onNodeWithTag("capabilities_list").performScrollToIndex(2)
+        composeRule.onNodeWithTag("capabilities_list").performScrollToIndex(3)
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("screen_capture_setup_card").assertIsDisplayed()
         composeRule.onNodeWithTag("capabilities_request_screen_capture").assertIsDisplayed()

@@ -1,33 +1,113 @@
 package com.example.ui.theme
 
+import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
 
-// Core Nexa Dark Palette
-val NexaBackground = Color(0xFF101114)
-val NexaSecondaryBackground = Color(0xFF181A1F)
-val NexaElevatedSurface = Color(0xFF20232A)
-val NexaHighestSurface = Color(0xFF272B33)
+@Immutable
+data class NexaColorPalette(
+    val isDark: Boolean,
+    val background: Color,
+    val secondaryBackground: Color,
+    val elevatedSurface: Color,
+    val highestSurface: Color,
+    val orange: Color,
+    val orangeMuted: Color,
+    val orangePressed: Color,
+    val onOrange: Color,
+    val textPrimary: Color,
+    val textSecondary: Color,
+    val textTertiary: Color,
+    val border: Color,
+    val borderSubtle: Color,
+    val success: Color,
+    val successContainer: Color,
+    val warning: Color,
+    val warningContainer: Color,
+    val error: Color,
+    val errorContainer: Color,
+    val info: Color,
+    val infoContainer: Color,
+    val neutral: Color,
+    val neutralContainer: Color
+)
 
-val NexaOrange = Color(0xFFF36B21)
-val NexaOrangeMuted = Color(0x24F36B21)
-val NexaOrangePressed = Color(0xFFD95812)
-val NexaOnOrange = Color(0xFF101114)
+val ObsidianDarkPalette = NexaColorPalette(
+    isDark = true,
+    background = Color(0xFF101114),
+    secondaryBackground = Color(0xFF181A1F),
+    elevatedSurface = Color(0xFF20232A),
+    highestSurface = Color(0xFF272B33),
+    orange = Color(0xFFF36B21),
+    orangeMuted = Color(0x24F36B21),
+    orangePressed = Color(0xFFD95812),
+    onOrange = Color(0xFF101114),
+    textPrimary = Color(0xFFF5F5F5),
+    textSecondary = Color(0xFFA0A3AA),
+    textTertiary = Color(0xFF6F747D),
+    border = Color(0xFF2B2F38),
+    borderSubtle = Color(0xFF22252C),
+    success = Color(0xFF34D399),
+    successContainer = Color(0x1F34D399),
+    warning = Color(0xFFFBBF24),
+    warningContainer = Color(0x1FFBBF24),
+    error = Color(0xFFF87171),
+    errorContainer = Color(0x1FF87171),
+    info = Color(0xFF60A5FA),
+    infoContainer = Color(0x1F60A5FA),
+    neutral = Color(0xFF8B909A),
+    neutralContainer = Color(0x1F8B909A)
+)
 
-val NexaTextPrimary = Color(0xFFF5F5F5)
-val NexaTextSecondary = Color(0xFFA0A3AA)
-val NexaTextTertiary = Color(0xFF6F747D)
+val DaylightLightPalette = NexaColorPalette(
+    isDark = false,
+    background = Color(0xFFF5F7FA),
+    secondaryBackground = Color(0xFFFFFFFF),
+    elevatedSurface = Color(0xFFECEFF4),
+    highestSurface = Color(0xFFE2E7F0),
+    orange = Color(0xFFD45512),
+    orangeMuted = Color(0x1AD45512),
+    orangePressed = Color(0xFFB5450B),
+    onOrange = Color(0xFFFFFFFF),
+    textPrimary = Color(0xFF11141A),
+    textSecondary = Color(0xFF4B5363),
+    textTertiary = Color(0xFF6E7787),
+    border = Color(0xFFD2D8E2),
+    borderSubtle = Color(0xFFE3E8F0),
+    success = Color(0xFF0F7B55),
+    successContainer = Color(0x1A0F7B55),
+    warning = Color(0xFF9A5B00),
+    warningContainer = Color(0x1A9A5B00),
+    error = Color(0xFFB91C1C),
+    errorContainer = Color(0x1AB91C1C),
+    info = Color(0xFF1D4ED8),
+    infoContainer = Color(0x1A1D4ED8),
+    neutral = Color(0xFF525B6C),
+    neutralContainer = Color(0x1A525B6C)
+)
 
-val NexaBorder = Color(0xFF2B2F38)
-val NexaBorderSubtle = Color(0xFF22252C)
-
-// Semantic Status Tokens
-val NexaSuccess = Color(0xFF34D399)
-val NexaSuccessContainer = Color(0x1F34D399)
-val NexaWarning = Color(0xFFFBBF24)
-val NexaWarningContainer = Color(0x1FFBBF24)
-val NexaError = Color(0xFFF87171)
-val NexaErrorContainer = Color(0x1FF87171)
-val NexaInfo = Color(0xFF60A5FA)
-val NexaInfoContainer = Color(0x1F60A5FA)
-val NexaNeutral = Color(0xFF8B909A)
-val NexaNeutralContainer = Color(0x1F8B909A)
+val HighContrastDarkPalette = NexaColorPalette(
+    isDark = true,
+    background = Color(0xFF000000),
+    secondaryBackground = Color(0xFF0D0F14),
+    elevatedSurface = Color(0xFF171A22),
+    highestSurface = Color(0xFF222733),
+    orange = Color(0xFFFF7A2F),
+    orangeMuted = Color(0x33FF7A2F),
+    orangePressed = Color(0xFFE0621A),
+    onOrange = Color(0xFF000000),
+    textPrimary = Color(0xFFFFFFFF),
+    textSecondary = Color(0xFFD4D8E0),
+    textTertiary = Color(0xFFA3AAB8),
+    border = Color(0xFF6B7280),
+    borderSubtle = Color(0xFF4B5563),
+    success = Color(0xFF4ADE80),
+    successContainer = Color(0x2B4ADE80),
+    warning = Color(0xFFFACC15),
+    warningContainer = Color(0x2BFACC15),
+    error = Color(0xFFFF6B6B),
+    errorContainer = Color(0x2BFF6B6B),
+    info = Color(0xFF7DD3FC),
+    infoContainer = Color(0x2B7DD3FC),
+    neutral = Color(0xFFD1D5DB),
+    neutralContainer = Color(0x2BD1D5DB)
+)

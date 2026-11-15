@@ -184,10 +184,13 @@ class ToolExecutionRuntime(
             if (visualAttachment != null && !finalOutput.isError) {
                 transientVisualAttachments[call.id] = visualAttachment
             }
-            val summary = if (settings.redactSensitiveStepsInLogs &&
-                tool.definition.riskCategory == com.example.domain.model.ToolRiskCategory.SENSITIVE
-            ) {
-                "Executed sensitive tool '${tool.definition.name}' (details redacted)"
+            val shouldRedactSummary = settings.redactSensitiveStepsInLogs && (
+                tool.definition.riskCategory == com.example.domain.model.ToolRiskCategory.SENSITIVE ||
+                    tool.definition.riskCategory == com.example.domain.model.ToolRiskCategory.EXTERNAL_SIDE_EFFECT ||
+                    tool.definition.name == "type_text"
+                )
+            val summary = if (shouldRedactSummary) {
+                "Executed '${tool.definition.name}' (details redacted)"
             } else {
                 finalOutput.displaySummary
             }

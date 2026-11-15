@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -58,19 +57,8 @@ import androidx.compose.ui.unit.dp
 import com.example.domain.model.ProviderConfig
 import com.example.ui.components.NoticeBanner
 import com.example.ui.components.StatusPill
-import com.example.ui.theme.NexaBorder
-import com.example.ui.theme.NexaElevatedSurface
-import com.example.ui.theme.NexaError
-import com.example.ui.theme.NexaInfo
-import com.example.ui.theme.NexaInfoContainer
-import com.example.ui.theme.NexaNeutral
-import com.example.ui.theme.NexaNeutralContainer
-import com.example.ui.theme.NexaOnOrange
-import com.example.ui.theme.NexaOrange
-import com.example.ui.theme.NexaOrangeMuted
-import com.example.ui.theme.NexaSecondaryBackground
-import com.example.ui.theme.NexaTextPrimary
-import com.example.ui.theme.NexaTextSecondary
+import com.example.ui.theme.LocalNexaHapticFeedback
+import com.example.ui.theme.NexaTheme
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -83,6 +71,8 @@ fun ProviderConfigSheet(
     onDisconnect: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val colors = NexaTheme.colors
+    val haptic = LocalNexaHapticFeedback.current
     var apiKeyInput by remember(config.providerType) { mutableStateOf("") }
     var showKeyPlaintext by remember { mutableStateOf(false) }
     var baseUrlInput by remember(config.providerType) { mutableStateOf(config.baseUrl) }
@@ -111,8 +101,8 @@ fun ProviderConfigSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = NexaSecondaryBackground,
-        contentColor = NexaTextPrimary
+        containerColor = colors.secondaryBackground,
+        contentColor = colors.textPrimary
     ) {
         Column(
             modifier = Modifier
@@ -125,12 +115,12 @@ fun ProviderConfigSheet(
             Text(
                 text = config.providerType.displayName,
                 style = MaterialTheme.typography.titleLarge,
-                color = NexaTextPrimary
+                color = colors.textPrimary
             )
             Text(
                 text = config.providerType.subtitle,
                 style = MaterialTheme.typography.bodySmall,
-                color = NexaTextSecondary
+                color = colors.textSecondary
             )
 
             if (canDisconnect) {
@@ -138,8 +128,8 @@ fun ProviderConfigSheet(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(10.dp))
-                        .background(NexaElevatedSurface)
-                        .border(1.dp, NexaBorder, RoundedCornerShape(10.dp))
+                        .background(colors.elevatedSurface)
+                        .border(1.dp, colors.border, RoundedCornerShape(10.dp))
                         .padding(horizontal = 12.dp, vertical = 10.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
@@ -152,18 +142,19 @@ fun ProviderConfigSheet(
                                 else -> "Configured Endpoint"
                             },
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (config.credentialInvalidated) NexaError else NexaTextSecondary
+                            color = if (config.credentialInvalidated) colors.error else colors.textSecondary
                         )
                         Text(
                             text = if (config.hasApiKey) config.maskedApiKey else config.baseUrl,
                             style = MaterialTheme.typography.bodyMedium,
-                            color = if (config.credentialInvalidated) NexaError else NexaOrange,
+                            color = if (config.credentialInvalidated) colors.error else colors.orange,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
                     TextButton(
                         onClick = {
+                            haptic.performPrimary()
                             onDisconnect()
                             onDismiss()
                         },
@@ -172,11 +163,11 @@ fun ProviderConfigSheet(
                         Icon(
                             imageVector = Icons.Outlined.DeleteOutline,
                             contentDescription = "Disconnect provider",
-                            tint = NexaError,
+                            tint = colors.error,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("Disconnect", color = NexaError)
+                        Text("Disconnect", color = colors.error)
                     }
                 }
             }
@@ -207,7 +198,7 @@ fun ProviderConfigSheet(
                         Icon(
                             imageVector = if (showKeyPlaintext) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
                             contentDescription = if (showKeyPlaintext) "Hide API key" else "Show API key",
-                            tint = NexaTextSecondary
+                            tint = colors.textSecondary
                         )
                     }
                 }
@@ -237,10 +228,13 @@ fun ProviderConfigSheet(
                 Text(
                     text = "Model Selection",
                     style = MaterialTheme.typography.titleSmall,
-                    color = NexaTextPrimary
+                    color = colors.textPrimary
                 )
                 TextButton(
-                    onClick = onRefreshModels,
+                    onClick = {
+                        haptic.performPrimary()
+                        onRefreshModels()
+                    },
                     enabled = !isRefreshingModels && (config.hasApiKey || config.providerType.requiresBaseUrl),
                     modifier = Modifier.testTag("provider_refresh_models_button")
                 ) {
@@ -248,7 +242,7 @@ fun ProviderConfigSheet(
                         CircularProgressIndicator(
                             modifier = Modifier.size(14.dp),
                             strokeWidth = 2.dp,
-                            color = NexaOrange
+                            color = colors.orange
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("Loading...")
@@ -264,7 +258,7 @@ fun ProviderConfigSheet(
                 NoticeBanner(
                     icon = Icons.Outlined.ErrorOutline,
                     text = refreshError,
-                    accentColor = NexaError
+                    accentColor = colors.error
                 )
             }
 
@@ -286,7 +280,7 @@ fun ProviderConfigSheet(
                 trailingIcon = {
                     if (manualModelInput.isNotBlank()) {
                         TextButton(onClick = { selectedModelId = manualModelInput.trim() }) {
-                            Text("Use", color = NexaOrange)
+                            Text("Use", color = colors.orange)
                         }
                     }
                 }
@@ -306,7 +300,7 @@ fun ProviderConfigSheet(
                         Icon(
                             imageVector = Icons.Outlined.Search,
                             contentDescription = null,
-                            tint = NexaTextSecondary
+                            tint = colors.textSecondary
                         )
                     },
                     trailingIcon = {
@@ -315,7 +309,7 @@ fun ProviderConfigSheet(
                                 Icon(
                                     imageVector = Icons.Outlined.Close,
                                     contentDescription = "Clear model search",
-                                    tint = NexaTextSecondary
+                                    tint = colors.textSecondary
                                 )
                             }
                         }
@@ -327,7 +321,7 @@ fun ProviderConfigSheet(
                 Text(
                     text = "No models match \"$modelSearchQuery\". You can enter a manual model ID above.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = NexaTextSecondary
+                    color = colors.textSecondary
                 )
             } else if (filteredModels.isNotEmpty()) {
                 LazyColumn(
@@ -342,13 +336,16 @@ fun ProviderConfigSheet(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(10.dp))
-                                .background(if (isSelected) NexaOrangeMuted else NexaElevatedSurface)
+                                .background(if (isSelected) colors.orangeMuted else colors.elevatedSurface)
                                 .border(
                                     1.dp,
-                                    if (isSelected) NexaOrange else NexaBorder,
+                                    if (isSelected) colors.orange else colors.border,
                                     RoundedCornerShape(10.dp)
                                 )
-                                .clickable { selectedModelId = model.id }
+                                .clickable {
+                                    haptic.performPrimary()
+                                    selectedModelId = model.id
+                                }
                                 .padding(horizontal = 12.dp, vertical = 10.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
@@ -361,15 +358,15 @@ fun ProviderConfigSheet(
                                     Text(
                                         text = model.displayName,
                                         style = MaterialTheme.typography.bodyMedium,
-                                        color = if (isSelected) NexaOrange else NexaTextPrimary,
+                                        color = if (isSelected) colors.orange else colors.textPrimary,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.weight(1f, fill = false)
                                     )
                                     StatusPill(
                                         label = if (model.isManualEntry) "Manual" else if (model.isCatalogVerified) "Live" else "Preset",
-                                        textColor = if (model.isCatalogVerified) NexaInfo else NexaNeutral,
-                                        containerColor = if (model.isCatalogVerified) NexaInfoContainer else NexaNeutralContainer,
+                                        textColor = if (model.isCatalogVerified) colors.info else colors.neutral,
+                                        containerColor = if (model.isCatalogVerified) colors.infoContainer else colors.neutralContainer,
                                         showDot = false
                                     )
                                 }
@@ -380,14 +377,14 @@ fun ProviderConfigSheet(
                                         if (model.supportsTools) append(" · Tools")
                                     },
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = NexaTextSecondary
+                                    color = colors.textSecondary
                                 )
                             }
                             if (isSelected) {
                                 Icon(
                                     imageVector = Icons.Outlined.Check,
                                     contentDescription = "Selected model",
-                                    tint = NexaOrange,
+                                    tint = colors.orange,
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
@@ -399,38 +396,50 @@ fun ProviderConfigSheet(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { setAsDefault = !setAsDefault },
+                    .clickable {
+                        haptic.performToggle()
+                        setAsDefault = !setAsDefault
+                    },
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Checkbox(
                     checked = setAsDefault,
-                    onCheckedChange = { setAsDefault = it },
+                    onCheckedChange = {
+                        haptic.performToggle()
+                        setAsDefault = it
+                    },
                     colors = CheckboxDefaults.colors(
-                        checkedColor = NexaOrange,
-                        checkmarkColor = NexaOnOrange
+                        checkedColor = colors.orange,
+                        checkmarkColor = colors.onOrange
                     )
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = "Set as default Nexa model",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = NexaTextPrimary
+                    color = colors.textPrimary
                 )
             }
 
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { allowManualToolsOverride = !allowManualToolsOverride }
+                    .clickable {
+                        haptic.performToggle()
+                        allowManualToolsOverride = !allowManualToolsOverride
+                    }
                     .testTag("provider_allow_tools_switch"),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Checkbox(
                     checked = allowManualToolsOverride,
-                    onCheckedChange = { allowManualToolsOverride = it },
+                    onCheckedChange = {
+                        haptic.performToggle()
+                        allowManualToolsOverride = it
+                    },
                     colors = CheckboxDefaults.colors(
-                        checkedColor = NexaOrange,
-                        checkmarkColor = NexaOnOrange
+                        checkedColor = colors.orange,
+                        checkmarkColor = colors.onOrange
                     )
                 )
                 Spacer(modifier = Modifier.width(6.dp))
@@ -438,12 +447,12 @@ fun ProviderConfigSheet(
                     Text(
                         text = "Allow tool calling for manual/unverified models",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = NexaTextPrimary
+                        color = colors.textPrimary
                     )
                     Text(
                         text = "Catalog-verified models enable tools automatically. Manual or custom models default to conversational-only unless enabled here.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = NexaTextSecondary
+                        color = colors.textSecondary
                     )
                 }
             }
@@ -452,7 +461,7 @@ fun ProviderConfigSheet(
                 NoticeBanner(
                     icon = Icons.Outlined.ErrorOutline,
                     text = err,
-                    accentColor = NexaError
+                    accentColor = colors.error
                 )
             }
 
@@ -468,6 +477,7 @@ fun ProviderConfigSheet(
                 }
                 Button(
                     onClick = {
+                        haptic.performConfirm()
                         val err = onSave(
                             apiKeyInput,
                             baseUrlInput,
@@ -486,8 +496,8 @@ fun ProviderConfigSheet(
                         .weight(1f)
                         .testTag("provider_save_button"),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = NexaOrange,
-                        contentColor = NexaOnOrange
+                        containerColor = colors.orange,
+                        contentColor = colors.onOrange
                     )
                 ) {
                     Text("Save Config")

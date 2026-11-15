@@ -7,6 +7,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <queries>
         <intent>
@@ -61,11 +63,23 @@
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
 
+        <service
+            android:name=".android.overlay.FloatingAgentOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-visible floating agent execution status indicator across apps" />
+        </service>
+
         <receiver
             android:name=".android.notifications.NexaTaskNotificationReceiver"
             android:exported="false">
             <intent-filter>
                 <action android:name="com.example.action.CANCEL_AGENT_TASK" />
+                <action android:name="com.example.action.PAUSE_AGENT_TASK" />
+                <action android:name="com.example.action.RESUME_AGENT_TASK" />
+                <action android:name="com.example.action.CONTINUE_AGENT_TASK" />
             </intent-filter>
         </receiver>
     </application>

@@ -14,6 +14,7 @@ import com.example.domain.model.AppSettings
 import com.example.domain.model.AppearancePosture
 import com.example.domain.model.ConfirmationMode
 import com.example.domain.model.DeviceCapabilityType
+import com.example.domain.model.FloatingIndicatorMode
 import com.example.domain.model.ResponseVerbosity
 import com.example.domain.model.TelegramConfig
 import com.example.domain.model.TelegramConnectionStatus
@@ -305,6 +306,9 @@ class NexaPreferencesDataStore(
             prefs[KEY_TASK_TIMEOUT_SEC] = latest.taskTimeoutSeconds
             prefs[KEY_MAX_TOOL_RESULT_CHARS] = latest.maxToolResultChars
             prefs[KEY_CUSTOM_SYSTEM_PROMPT] = latest.customSystemPrompt
+            prefs[KEY_FLOATING_INDICATOR_MODE] = latest.floatingIndicatorMode.name
+            prefs[KEY_APPLOCK_WAIT_SEC] = latest.appLockWaitTimeoutSeconds
+            prefs[KEY_NO_PROGRESS_LIMIT] = latest.noProgressRetryLimit
             prefs[KEY_BG_QUEUE] = latest.allowBackgroundTaskQueue
             prefs[KEY_APP_SUGGESTIONS] = latest.allowAppLaunchSuggestions
             prefs[KEY_CONFIRM_MODE] = latest.confirmationMode.name
@@ -337,6 +341,13 @@ class NexaPreferencesDataStore(
         taskTimeoutSeconds = prefs[KEY_TASK_TIMEOUT_SEC] ?: 120,
         maxToolResultChars = prefs[KEY_MAX_TOOL_RESULT_CHARS] ?: 8_000,
         customSystemPrompt = prefs[KEY_CUSTOM_SYSTEM_PROMPT] ?: "",
+        floatingIndicatorMode = runCatching {
+            FloatingIndicatorMode.valueOf(
+                prefs[KEY_FLOATING_INDICATOR_MODE] ?: FloatingIndicatorMode.AUTO_EXTERNAL_APPS.name
+            )
+        }.getOrDefault(FloatingIndicatorMode.AUTO_EXTERNAL_APPS),
+        appLockWaitTimeoutSeconds = (prefs[KEY_APPLOCK_WAIT_SEC] ?: 180).coerceIn(30, 300),
+        noProgressRetryLimit = (prefs[KEY_NO_PROGRESS_LIMIT] ?: 3).coerceIn(2, 6),
         allowBackgroundTaskQueue = prefs[KEY_BG_QUEUE] ?: false,
         allowAppLaunchSuggestions = prefs[KEY_APP_SUGGESTIONS] ?: true,
         confirmationMode = runCatching {
@@ -351,6 +362,22 @@ class NexaPreferencesDataStore(
         redactSensitiveStepsInLogs = prefs[KEY_REDACT_LOGS] ?: true,
         biometricLockOnApproval = prefs[KEY_BIO_APPROVAL] ?: false
     )
+
+    val memoryEntriesJson: Flow<String?> = dataStore.data.map { it[KEY_MEMORY_ENTRIES_JSON] }
+
+    suspend fun readMemoryEntriesJson(): String? = dataStore.data.first()[KEY_MEMORY_ENTRIES_JSON]
+
+    suspend fun writeMemoryEntriesJson(json: String) {
+        dataStore.edit { prefs ->
+            prefs[KEY_MEMORY_ENTRIES_JSON] = json
+        }
+    }
+
+    suspend fun clearMemoryEntriesJson() {
+        dataStore.edit { prefs ->
+            prefs.remove(KEY_MEMORY_ENTRIES_JSON)
+        }
+    }
 
     private fun providerKey(type: AiProviderType, field: String) =
         stringPreferencesKey("provider_${type.id}_$field")
@@ -385,6 +412,9 @@ class NexaPreferencesDataStore(
         val KEY_TASK_TIMEOUT_SEC = intPreferencesKey("set_task_timeout_sec")
         val KEY_MAX_TOOL_RESULT_CHARS = intPreferencesKey("set_max_tool_result_chars")
         val KEY_CUSTOM_SYSTEM_PROMPT = stringPreferencesKey("set_custom_system_prompt")
+        val KEY_FLOATING_INDICATOR_MODE = stringPreferencesKey("set_floating_indicator_mode")
+        val KEY_APPLOCK_WAIT_SEC = intPreferencesKey("set_applock_wait_sec")
+        val KEY_NO_PROGRESS_LIMIT = intPreferencesKey("set_no_progress_limit")
         val KEY_BG_QUEUE = booleanPreferencesKey("set_bg_queue")
         val KEY_APP_SUGGESTIONS = booleanPreferencesKey("set_app_suggestions")
         val KEY_CONFIRM_MODE = stringPreferencesKey("set_confirm_mode")
@@ -396,5 +426,6 @@ class NexaPreferencesDataStore(
         val KEY_MASK_EXPORTS = booleanPreferencesKey("set_mask_exports")
         val KEY_REDACT_LOGS = booleanPreferencesKey("set_redact_logs")
         val KEY_BIO_APPROVAL = booleanPreferencesKey("set_bio_approval")
+        val KEY_MEMORY_ENTRIES_JSON = stringPreferencesKey("local_memory_entries_json")
     }
 }

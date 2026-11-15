@@ -39,14 +39,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.domain.model.ComposerAttachment
-import com.example.ui.theme.NexaBorder
-import com.example.ui.theme.NexaElevatedSurface
-import com.example.ui.theme.NexaOnOrange
-import com.example.ui.theme.NexaOrange
-import com.example.ui.theme.NexaSecondaryBackground
-import com.example.ui.theme.NexaTextPrimary
-import com.example.ui.theme.NexaTextSecondary
-import com.example.ui.theme.NexaTextTertiary
+import com.example.ui.theme.LocalNexaHapticFeedback
+import com.example.ui.theme.NexaTheme
 
 @Composable
 fun ChatComposer(
@@ -63,16 +57,18 @@ fun ChatComposer(
     modifier: Modifier = Modifier
 ) {
     val canSend = draftText.isNotBlank() || attachments.isNotEmpty()
+    val colors = NexaTheme.colors
+    val haptic = LocalNexaHapticFeedback.current
 
     Surface(
         modifier = modifier.fillMaxWidth(),
-        color = NexaSecondaryBackground,
+        color = colors.secondaryBackground,
         tonalElevation = 0.dp
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .border(width = 1.dp, color = NexaBorder, shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp))
+                .border(width = 1.dp, color = colors.border, shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp))
                 .padding(horizontal = 12.dp, vertical = 10.dp)
         ) {
             if (attachments.isNotEmpty()) {
@@ -87,15 +83,15 @@ fun ChatComposer(
                         Row(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(10.dp))
-                                .background(NexaElevatedSurface)
-                                .border(1.dp, NexaBorder, RoundedCornerShape(10.dp))
+                                .background(colors.elevatedSurface)
+                                .border(1.dp, colors.border, RoundedCornerShape(10.dp))
                                 .padding(start = 10.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
                                 text = attachment.displayName,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = NexaTextPrimary
+                                color = colors.textPrimary
                             )
                             IconButton(
                                 onClick = { onRemoveAttachment(attachment.id) },
@@ -104,7 +100,7 @@ fun ChatComposer(
                                 Icon(
                                     imageVector = Icons.Outlined.Close,
                                     contentDescription = "Remove attachment",
-                                    tint = NexaTextSecondary,
+                                    tint = colors.textSecondary,
                                     modifier = Modifier.size(14.dp)
                                 )
                             }
@@ -117,8 +113,8 @@ fun ChatComposer(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(14.dp))
-                    .background(NexaElevatedSurface)
-                    .border(1.dp, NexaBorder, RoundedCornerShape(14.dp))
+                    .background(colors.elevatedSurface)
+                    .border(1.dp, colors.border, RoundedCornerShape(14.dp))
                     .padding(horizontal = 14.dp, vertical = 10.dp)
             ) {
                 BasicTextField(
@@ -127,15 +123,15 @@ fun ChatComposer(
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("chat_composer_input"),
-                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = NexaTextPrimary),
-                    cursorBrush = SolidColor(NexaOrange),
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.textPrimary),
+                    cursorBrush = SolidColor(colors.orange),
                     maxLines = 5,
                     decorationBox = { innerTextField ->
                         if (draftText.isEmpty()) {
                             Text(
                                 text = stringResource(R.string.chat_input_placeholder),
                                 style = MaterialTheme.typography.bodyLarge,
-                                color = NexaTextTertiary
+                                color = colors.textTertiary
                             )
                         }
                         innerTextField()
@@ -163,7 +159,7 @@ fun ChatComposer(
                         Icon(
                             imageVector = Icons.Outlined.AttachFile,
                             contentDescription = stringResource(R.string.chat_attach),
-                            tint = NexaTextSecondary,
+                            tint = colors.textSecondary,
                             modifier = Modifier.size(20.dp)
                         )
                     }
@@ -176,7 +172,7 @@ fun ChatComposer(
                         Icon(
                             imageVector = Icons.Outlined.Mic,
                             contentDescription = stringResource(R.string.chat_voice),
-                            tint = NexaTextSecondary,
+                            tint = colors.textSecondary,
                             modifier = Modifier.size(20.dp)
                         )
                     }
@@ -189,7 +185,7 @@ fun ChatComposer(
                         Icon(
                             imageVector = Icons.Outlined.Build,
                             contentDescription = stringResource(R.string.chat_tools),
-                            tint = NexaTextSecondary,
+                            tint = colors.textSecondary,
                             modifier = Modifier.size(19.dp)
                         )
                     }
@@ -197,37 +193,45 @@ fun ChatComposer(
 
                 if (isResponding) {
                     Surface(
-                        onClick = onStopClick,
+                        onClick = {
+                            haptic.performPrimary()
+                            onStopClick()
+                        },
                         modifier = Modifier
                             .size(48.dp)
                             .testTag("composer_stop_button"),
                         shape = CircleShape,
-                        color = NexaElevatedSurface
+                        color = colors.elevatedSurface
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
                                 imageVector = Icons.Rounded.Stop,
                                 contentDescription = stringResource(R.string.chat_stop),
-                                tint = NexaOrange,
+                                tint = colors.orange,
                                 modifier = Modifier.size(20.dp)
                             )
                         }
                     }
                 } else {
                     Surface(
-                        onClick = { if (canSend) onSendClick() },
+                        onClick = {
+                            if (canSend) {
+                                haptic.performPrimary()
+                                onSendClick()
+                            }
+                        },
                         enabled = canSend,
                         modifier = Modifier
                             .size(48.dp)
                             .testTag("composer_send_button"),
                         shape = CircleShape,
-                        color = if (canSend) NexaOrange else NexaElevatedSurface
+                        color = if (canSend) colors.orange else colors.elevatedSurface
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Rounded.Send,
                                 contentDescription = stringResource(R.string.chat_send),
-                                tint = if (canSend) NexaOnOrange else NexaTextTertiary,
+                                tint = if (canSend) colors.onOrange else colors.textTertiary,
                                 modifier = Modifier.size(19.dp)
                             )
                         }

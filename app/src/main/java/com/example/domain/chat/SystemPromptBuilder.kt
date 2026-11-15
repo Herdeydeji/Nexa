@@ -15,7 +15,8 @@ class SystemPromptBuilder {
         availableTools: List<ToolDefinition> = emptyList(),
         toolsEnabledForModel: Boolean = false,
         capabilities: List<DeviceCapability> = emptyList(),
-        registeredTools: List<RegisteredToolEntry> = emptyList()
+        registeredTools: List<RegisteredToolEntry> = emptyList(),
+        memoryEntries: List<com.example.domain.model.MemoryEntry> = emptyList()
     ): String = buildString {
         append(
             "You are Nexa, a helpful, accurate conversational AI assistant and Android computer-use agent running natively on Android. " +
@@ -33,13 +34,19 @@ class SystemPromptBuilder {
             append("\n\nAutonomous Agent & Computer-Use Guidelines:\n")
             append(
                 "- Answer general knowledge, coding, and explanation questions directly without invoking device tools.\n" +
-                    "- Dynamically select and chain general-purpose tools (such as list_installed_apps, find_app, launch_app, observe_screen, tap_element, type_text, scroll_screen, press_enter, press_back, wait_for_screen_change, take_screenshot) when they are available in this session.\n" +
-                    "- App discovery and launching (list_installed_apps, find_app, launch_app) work natively on Android without requiring Accessibility Service.\n" +
+                    "- Dynamically select and chain general-purpose tools (such as list_installed_apps, find_app, launch_app, open_url, play_on_youtube, observe_screen, tap_element, type_text, scroll_screen, press_enter, press_back, wait_for_screen_change, take_screenshot) when they are available in this session.\n" +
+                    "- App discovery and launching (list_installed_apps, find_app, launch_app, open_url) work natively on Android without requiring Accessibility Service.\n" +
+                    "- For opening and playing a specific song or video on YouTube, prefer play_on_youtube(query) when available, and report playback as started ONLY if the tool returns PLAYBACK_STARTED; otherwise report truthfully that search opened or playback could not be verified.\n" +
+                    "- If launch_app or find_app returns AMBIGUOUS candidates, wait for or ask the user to choose the intended app instead of guessing.\n" +
+                    "- If launch_app or play_on_youtube returns BLOCKED_BY_APPLOCK, do NOT attempt to tap AppLock or repeatedly relaunch the app. Nexa waits automatically for the user to unlock on device.\n" +
                     "- When Accessibility tools are available, call observe_screen (or inspect post-action screen observations) before tapping or typing into elements so you use real observed text, view IDs, or node indices.\n" +
-                    "- Verify resulting screen state after each action. Never claim a tap, launch, capture, search, or navigation succeeded unless the tool result confirmed it.\n" +
-                    "- If a tool returns an error or element not found, inspect the returned outcome and recover cleanly or inform the user honestly.\n" +
+                    "- Verify resulting screen state after each action. Never claim a launch, tap, typing action, playback, capture, or navigation succeeded unless the tool result verified it.\n" +
+                    "- Do not repeat identical observe_screen or wait_for_screen_change calls when screen state is unchanged; adapt your action or explain the blocker honestly.\n" +
                     "- Do not attempt to send messages, place calls, confirm payments, or delete user data without explicit user confirmation."
             )
+            if (settings.localMemoryEnabled && activeDefs.any { it.name == "save_memory_note" }) {
+                append("\n- When the user explicitly asks you to remember a preference or personal fact across sessions, use save_memory_note to store it on-device.")
+            }
             append("\n\nAvailable tools in this session:\n")
             activeDefs.forEach { tool ->
                 append("- ${tool.name} (${tool.riskCategory.label}): ${tool.description}\n")
@@ -78,6 +85,13 @@ class SystemPromptBuilder {
                 append(
                     "Important: Screenshot capture (take_screenshot) currently requires explicit MediaProjection permission. If the user asks for a screenshot, tell them to tap 'Grant Screen Capture' in Chat or Connections -> Capabilities.\n"
                 )
+            }
+        }
+
+        if (settings.localMemoryEnabled && memoryEntries.isNotEmpty()) {
+            append("\n\nSaved On-Device User Memory (apply only when relevant):\n")
+            memoryEntries.take(25).forEach { entry ->
+                append("- [${entry.category}] ${entry.text}\n")
             }
         }
 

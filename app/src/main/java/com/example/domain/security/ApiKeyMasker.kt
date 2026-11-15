@@ -72,6 +72,20 @@ object ApiKeyMasker {
         return cleaned.trim()
     }
 
+    fun sanitizeTranscriptOrDiagnostics(
+        raw: String,
+        secretsToMask: List<String> = emptyList()
+    ): String {
+        var cleaned = sanitizeErrorText(raw)
+        secretsToMask.filter { it.isNotBlank() }.forEach { secret ->
+            cleaned = cleaned.replace(secret.trim(), "[REDACTED_SECRET]")
+        }
+        cleaned = cleaned.replace(Regex("\\b\\d{8,12}:[A-Za-z0-9_-]{24,}\\b"), "[REDACTED_BOT_TOKEN]")
+        cleaned = cleaned.replace(Regex("([?&](?:key|api_key|token|secret)=)[^&\\s]+", RegexOption.IGNORE_CASE), "$1[REDACTED]")
+        cleaned = cleaned.replace(Regex("((?:api[_-]?key|authorization|token|password)\\s*[:=]\\s*)([^\\s,;\"']+)", RegexOption.IGNORE_CASE), "$1[REDACTED]")
+        return cleaned
+    }
+
     private fun isLocalOrLanHost(host: String): Boolean {
         return host == "localhost" ||
             host == "127.0.0.1" ||

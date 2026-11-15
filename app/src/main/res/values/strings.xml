@@ -43,4 +43,12 @@
     <string name="notification_channel_capture_desc">Active while MediaProjection screen capture consent is granted for on-demand visual screenshots.</string>
     <string name="media_projection_notif_title">Nexa Screen Capture Active</string>
     <string name="media_projection_notif_body">On-demand screenshots are enabled for this session. Tap Stop Session to revoke.</string>
+
+    <string name="notification_channel_overlay_name">Nexa Floating Agent Indicator</string>
+    <string name="notification_channel_overlay_desc">Keeps the compact floating Nexa status indicator active while automating tasks across apps.</string>
+    <string name="overlay_permission_title">Display Over Other Apps</string>
+    <string name="overlay_permission_rationale">Allows Nexa to show a compact floating status bubble when running tasks in other apps, with quick Pause, Continue, and Stop controls.</string>
+    <string name="grant_overlay_permission">Grant Overlay Permission</string>
+    <string name="applock_unlock_title">Unlock %1$s</string>
+    <string name="applock_unlock_message">Your device\'s AppLock is protecting this application. Unlock it on your phone. Nexa will continue automatically when access is available.</string>
 </resources>

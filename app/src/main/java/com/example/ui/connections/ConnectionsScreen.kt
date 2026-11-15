@@ -25,6 +25,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
@@ -32,15 +33,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.domain.model.AiProviderType
-import com.example.ui.theme.NexaBackground
-import com.example.ui.theme.NexaBorder
-import com.example.ui.theme.NexaBorderSubtle
-import com.example.ui.theme.NexaElevatedSurface
-import com.example.ui.theme.NexaOrange
-import com.example.ui.theme.NexaOrangeMuted
-import com.example.ui.theme.NexaSecondaryBackground
-import com.example.ui.theme.NexaTextPrimary
-import com.example.ui.theme.NexaTextSecondary
+import com.example.ui.theme.LocalNexaHapticFeedback
+import com.example.ui.theme.NexaTheme
 
 @Composable
 fun ConnectionsScreen(
@@ -48,6 +42,9 @@ fun ConnectionsScreen(
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val colors = NexaTheme.colors
+    val haptic = LocalNexaHapticFeedback.current
     var editingProviderType by remember { mutableStateOf<AiProviderType?>(null) }
 
     val screenCaptureLauncher = rememberLauncherForActivityResult(
@@ -59,10 +56,10 @@ fun ConnectionsScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(NexaBackground)
+            .background(colors.background)
     ) {
         Surface(
-            color = NexaSecondaryBackground,
+            color = colors.secondaryBackground,
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.fillMaxWidth()) {
@@ -74,12 +71,12 @@ fun ConnectionsScreen(
                     Text(
                         text = stringResource(R.string.connections_title),
                         style = MaterialTheme.typography.headlineMedium,
-                        color = NexaTextPrimary
+                        color = colors.textPrimary
                     )
                     Text(
                         text = "AI providers, Telegram remote bridge, and device capabilities",
                         style = MaterialTheme.typography.bodySmall,
-                        color = NexaTextSecondary
+                        color = colors.textSecondary
                     )
                 }
 
@@ -88,8 +85,8 @@ fun ConnectionsScreen(
                         .fillMaxWidth()
                         .padding(start = 16.dp, end = 16.dp, bottom = 12.dp)
                         .clip(RoundedCornerShape(12.dp))
-                        .background(NexaElevatedSurface)
-                        .border(1.dp, NexaBorder, RoundedCornerShape(12.dp))
+                        .background(colors.elevatedSurface)
+                        .border(1.dp, colors.border, RoundedCornerShape(12.dp))
                         .padding(4.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
@@ -99,8 +96,11 @@ fun ConnectionsScreen(
                             modifier = Modifier
                                 .weight(1f)
                                 .clip(RoundedCornerShape(9.dp))
-                                .background(if (selected) NexaOrangeMuted else NexaElevatedSurface)
-                                .clickable { viewModel.selectTab(subTab) }
+                                .background(if (selected) colors.orangeMuted else colors.elevatedSurface)
+                                .clickable {
+                                    haptic.performPrimary()
+                                    viewModel.selectTab(subTab)
+                                }
                                 .padding(vertical = 9.dp)
                                 .testTag("connections_subtab_${subTab.name.lowercase()}"),
                             contentAlignment = Alignment.Center
@@ -108,7 +108,7 @@ fun ConnectionsScreen(
                             Text(
                                 text = subTab.label,
                                 style = MaterialTheme.typography.labelMedium,
-                                color = if (selected) NexaOrange else NexaTextSecondary,
+                                color = if (selected) colors.orange else colors.textSecondary,
                                 textAlign = TextAlign.Center
                             )
                         }
@@ -119,7 +119,7 @@ fun ConnectionsScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(1.dp)
-                        .background(NexaBorderSubtle)
+                        .background(colors.borderSubtle)
                 )
             }
         }
@@ -142,6 +142,9 @@ fun ConnectionsScreen(
             )
             ConnectionsSubTab.CAPABILITIES -> CapabilitiesTab(
                 capabilities = state.capabilities,
+                totalCapabilitiesCount = state.totalCapabilitiesCount,
+                availableCapabilitiesCount = state.availableCapabilitiesCount,
+                actionNeededCapabilitiesCount = state.actionNeededCapabilitiesCount,
                 selectedCategory = state.capabilityFilter,
                 accessibilityState = state.accessibilityState,
                 accessibilityReason = state.accessibilityReason,
@@ -158,7 +161,23 @@ fun ConnectionsScreen(
                         screenCaptureLauncher.launch(intent)
                     }
                 },
-                onStopScreenCapture = viewModel::stopMediaProjectionSession
+                onStopScreenCapture = viewModel::stopMediaProjectionSession,
+                canDrawOverlays = state.canDrawOverlays,
+                onOpenOverlaySettings = {
+                    val intent = viewModel.createOverlaySettingsIntent()
+                    if (intent != null) {
+                        runCatching { context.startActivity(intent) }
+                    }
+                },
+                installedAppsSheetVisible = state.installedAppsSheetVisible,
+                installedAppsSearchQuery = state.installedAppsSearchQuery,
+                discoveredApps = state.discoveredApps,
+                appLaunchFeedback = state.appLaunchFeedback,
+                onOpenInstalledApps = viewModel::openInstalledAppsSheet,
+                onCloseInstalledApps = viewModel::closeInstalledAppsSheet,
+                onAppsSearchQueryChange = viewModel::updateAppsSearchQuery,
+                onTestLaunchApp = viewModel::testLaunchDiscoveredApp,
+                onDismissAppLaunchFeedback = viewModel::dismissAppLaunchFeedback
             )
         }
     }

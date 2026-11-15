@@ -765,7 +765,7 @@ class NexaPhase3AgentTest {
         try {
             // Session 1: Create v3 DB, persist live completed task + crashed RUNNING task + tool-assisted messages
             val db1 = Room.databaseBuilder(context, NexaDatabase::class.java, dbFile.absolutePath)
-                .addMigrations(NexaDatabase.MIGRATION_2_3)
+                .addMigrations(NexaDatabase.MIGRATION_2_3, NexaDatabase.MIGRATION_3_4, NexaDatabase.MIGRATION_4_5)
                 .allowMainThreadQueries()
                 .build()
             val chatRepo1 = ChatRepository(db1.conversationDao(), converters)
@@ -824,7 +824,7 @@ class NexaPhase3AgentTest {
 
             // Session 2: Reopen DB and run startup initialization
             val db2 = Room.databaseBuilder(context, NexaDatabase::class.java, dbFile.absolutePath)
-                .addMigrations(NexaDatabase.MIGRATION_2_3)
+                .addMigrations(NexaDatabase.MIGRATION_2_3, NexaDatabase.MIGRATION_3_4, NexaDatabase.MIGRATION_4_5)
                 .allowMainThreadQueries()
                 .build()
             db2.initializePhase2DataIfNeeded(converters)
@@ -881,7 +881,7 @@ class NexaPhase3AgentTest {
             helper.close()
 
             val upgraded = Room.databaseBuilder(context, NexaDatabase::class.java, dbName)
-                .addMigrations(NexaDatabase.MIGRATION_2_3)
+                .addMigrations(NexaDatabase.MIGRATION_2_3, NexaDatabase.MIGRATION_3_4, NexaDatabase.MIGRATION_4_5)
                 .allowMainThreadQueries()
                 .build()
             runTest {

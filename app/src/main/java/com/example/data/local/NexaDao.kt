@@ -18,6 +18,9 @@ interface ConversationDao {
     @Query("SELECT * FROM conversations WHERE id = :conversationId LIMIT 1")
     suspend fun getConversation(conversationId: String): ConversationEntity?
 
+    @Query("SELECT * FROM conversations ORDER BY updatedAtMillis DESC")
+    suspend fun getAllConversationsSnapshot(): List<ConversationEntity>
+
     @Query("SELECT COUNT(*) FROM conversations")
     suspend fun countConversations(): Int
 
@@ -30,8 +33,19 @@ interface ConversationDao {
     @Query("UPDATE conversations SET lastMessagePreview = :preview, updatedAtMillis = :updatedAt WHERE id = :id")
     suspend fun updateConversationPreview(id: String, preview: String, updatedAt: Long)
 
+    @Query(
+        "UPDATE conversations SET preferredProviderId = :providerId, preferredModelId = :modelId, updatedAtMillis = :updatedAt WHERE id = :id"
+    )
+    suspend fun updatePreferredModel(id: String, providerId: String?, modelId: String?, updatedAt: Long)
+
     @Query("DELETE FROM conversations WHERE id = :id")
     suspend fun deleteConversation(id: String)
+
+    @Query("DELETE FROM conversations WHERE isSamplePreview = 0 AND updatedAtMillis < :cutoffMillis")
+    suspend fun deleteExpiredUserConversations(cutoffMillis: Long): Int
+
+    @Query("DELETE FROM conversations WHERE isSamplePreview = 0 AND updatedAtMillis < :cutoffMillis AND id NOT IN (:activeIds)")
+    suspend fun deleteExpiredUserConversationsExcluding(cutoffMillis: Long, activeIds: List<String>): Int
 
     @Query("DELETE FROM conversations WHERE isSamplePreview = 1")
     suspend fun removePreviewConversations()
@@ -65,6 +79,9 @@ interface ConversationDao {
 interface TaskDao {
     @Query("SELECT * FROM agent_tasks ORDER BY updatedAtMillis DESC")
     fun observeAllTasks(): Flow<List<AgentTaskEntity>>
+
+    @Query("SELECT * FROM agent_tasks ORDER BY updatedAtMillis DESC LIMIT :limit")
+    suspend fun getTasksSnapshot(limit: Int = 20): List<AgentTaskEntity>
 
     @Query("SELECT * FROM agent_tasks WHERE id = :taskId LIMIT 1")
     fun observeTaskById(taskId: String): Flow<AgentTaskEntity?>
@@ -111,8 +128,13 @@ interface TaskDao {
     )
 
     @Query(
+        "UPDATE agent_tasks SET resumableSnapshotJson = :snapshotJson, updatedAtMillis = :updatedAt WHERE id = :taskId"
+    )
+    suspend fun updateResumableSnapshot(taskId: String, snapshotJson: String?, updatedAt: Long)
+
+    @Query(
         "SELECT * FROM agent_tasks WHERE isSampleData = 0 AND " +
-            "status IN ('RUNNING', 'AWAITING_APPROVAL', 'PAUSED')"
+            "status IN ('RUNNING', 'AWAITING_APPROVAL', 'WAITING_FOR_USER_UNLOCK', 'WAITING_FOR_PERMISSION', 'WAITING_FOR_EXTERNAL_APP', 'VERIFYING', 'PAUSED')"
     )
     suspend fun getActiveLiveTasks(): List<AgentTaskEntity>
 

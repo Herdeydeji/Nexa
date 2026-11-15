@@ -8,9 +8,21 @@ import com.example.NexaApplication
 class NexaTaskNotificationReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context?, intent: Intent?) {
         if (context == null || intent == null) return
-        if (intent.action != NexaTaskNotificationManager.ACTION_CANCEL_AGENT_TASK) return
         val app = context.applicationContext as? NexaApplication ?: return
-        app.container.agentRunController.cancelActiveRun()
-        app.container.taskNotificationManager.dismiss()
+        when (intent.action) {
+            NexaTaskNotificationManager.ACTION_CANCEL_AGENT_TASK -> {
+                app.container.agentRunController.cancelActiveRun()
+                app.container.taskNotificationManager.dismiss()
+            }
+            NexaTaskNotificationManager.ACTION_PAUSE_AGENT_TASK -> {
+                app.container.agentRunController.pause()
+            }
+            NexaTaskNotificationManager.ACTION_RESUME_AGENT_TASK -> {
+                app.container.agentRunController.resume()
+            }
+            NexaTaskNotificationManager.ACTION_CONTINUE_AGENT_TASK -> {
+                app.container.agentRunController.submitUnlockContinue()
+            }
+        }
     }
 }

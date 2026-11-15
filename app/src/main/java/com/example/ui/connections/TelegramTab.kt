@@ -42,17 +42,8 @@ import com.example.ui.components.NexaSurfaceCard
 import com.example.ui.components.NoticeBanner
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.StatusPill
-import com.example.ui.theme.NexaBorder
-import com.example.ui.theme.NexaError
-import com.example.ui.theme.NexaErrorContainer
-import com.example.ui.theme.NexaNeutral
-import com.example.ui.theme.NexaNeutralContainer
-import com.example.ui.theme.NexaOnOrange
-import com.example.ui.theme.NexaOrange
-import com.example.ui.theme.NexaTextPrimary
-import com.example.ui.theme.NexaTextSecondary
-import com.example.ui.theme.NexaWarning
-import com.example.ui.theme.NexaWarningContainer
+import com.example.ui.theme.LocalNexaHapticFeedback
+import com.example.ui.theme.NexaTheme
 
 @Composable
 fun TelegramTab(
@@ -63,13 +54,15 @@ fun TelegramTab(
     onDisconnect: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val colors = NexaTheme.colors
+    val haptic = LocalNexaHapticFeedback.current
     var botTokenInput by remember { mutableStateOf("") }
     var handleInput by remember(config.pairingHandle) { mutableStateOf(config.pairingHandle) }
 
     val (statusColor, statusBg) = when (config.status) {
-        TelegramConnectionStatus.DISCONNECTED -> NexaNeutral to NexaNeutralContainer
-        TelegramConnectionStatus.PAIRING_PENDING -> NexaWarning to NexaWarningContainer
-        TelegramConnectionStatus.VALIDATION_ERROR -> NexaError to NexaErrorContainer
+        TelegramConnectionStatus.DISCONNECTED -> colors.neutral to colors.neutralContainer
+        TelegramConnectionStatus.PAIRING_PENDING -> colors.warning to colors.warningContainer
+        TelegramConnectionStatus.VALIDATION_ERROR -> colors.error to colors.errorContainer
     }
 
     LazyColumn(
@@ -80,7 +73,7 @@ fun TelegramTab(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item(key = "tg_status") {
-            NexaSurfaceCard(borderColor = NexaBorder) {
+            NexaSurfaceCard(borderColor = colors.border) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -93,13 +86,13 @@ fun TelegramTab(
                         Icon(
                             imageVector = Icons.AutoMirrored.Outlined.Send,
                             contentDescription = null,
-                            tint = NexaOrange,
+                            tint = colors.orange,
                             modifier = Modifier.size(20.dp)
                         )
                         Text(
                             text = "Telegram Bridge",
                             style = MaterialTheme.typography.titleMedium,
-                            color = NexaTextPrimary
+                            color = colors.textPrimary
                         )
                     }
                     StatusPill(
@@ -112,16 +105,16 @@ fun TelegramTab(
                 NoticeBanner(
                     icon = Icons.Outlined.Info,
                     text = config.statusNote,
-                    accentColor = NexaWarning
+                    accentColor = colors.warning
                 )
             }
         }
 
         item(key = "tg_pairing") {
-            NexaSurfaceCard(borderColor = NexaBorder) {
+            NexaSurfaceCard(borderColor = colors.border) {
                 SectionHeader(
                     title = "Pairing Interface",
-                    subtitle = "Store encrypted bot draft credentials locally for Phase 2 remote pairing"
+                    subtitle = "Store encrypted bot draft credentials locally for Telegram remote bridge"
                 )
                 Spacer(modifier = Modifier.height(12.dp))
 
@@ -129,7 +122,7 @@ fun TelegramTab(
                     Text(
                         text = "Saved token: ${config.maskedBotToken}",
                         style = MaterialTheme.typography.labelSmall,
-                        color = NexaOrange
+                        color = colors.orange
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                 }
@@ -162,7 +155,7 @@ fun TelegramTab(
                     NoticeBanner(
                         icon = Icons.Outlined.ErrorOutline,
                         text = err,
-                        accentColor = NexaError
+                        accentColor = colors.error
                     )
                 }
 
@@ -174,6 +167,7 @@ fun TelegramTab(
                 ) {
                     Button(
                         onClick = {
+                            haptic.performConfirm()
                             onSavePairingDraft(botTokenInput, handleInput)
                             botTokenInput = ""
                         },
@@ -181,14 +175,15 @@ fun TelegramTab(
                             .weight(1f)
                             .testTag("telegram_save_draft_button"),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = NexaOrange,
-                            contentColor = NexaOnOrange
+                            containerColor = colors.orange,
+                            contentColor = colors.onOrange
                         )
                     ) {
                         Text("Save Draft")
                     }
                     OutlinedButton(
                         onClick = {
+                            haptic.performPrimary()
                             botTokenInput = ""
                             handleInput = ""
                             onDisconnect()
@@ -206,10 +201,10 @@ fun TelegramTab(
         }
 
         item(key = "tg_permissions") {
-            NexaSurfaceCard(borderColor = NexaBorder) {
+            NexaSurfaceCard(borderColor = colors.border) {
                 SectionHeader(
                     title = "Remote Access Permissions",
-                    subtitle = "Define guardrails before enabling Telegram commands in Phase 2"
+                    subtitle = "Define guardrails for Telegram commands"
                 )
                 Spacer(modifier = Modifier.height(12.dp))
 
@@ -217,21 +212,30 @@ fun TelegramTab(
                     title = "Allow remote task prompts",
                     subtitle = "Permit paired Telegram chats to queue Nexa tasks.",
                     checked = config.allowRemotePrompts,
-                    onCheckedChange = { onUpdatePermissions(it, null, null) }
+                    onCheckedChange = {
+                        haptic.performToggle()
+                        onUpdatePermissions(it, null, null)
+                    }
                 )
                 Spacer(modifier = Modifier.height(10.dp))
                 TelegramPermissionRow(
                     title = "Require on-device approval",
                     subtitle = "Pause sensitive device actions until confirmed locally on phone.",
                     checked = config.requireDeviceApproval,
-                    onCheckedChange = { onUpdatePermissions(null, it, null) }
+                    onCheckedChange = {
+                        haptic.performToggle()
+                        onUpdatePermissions(null, it, null)
+                    }
                 )
                 Spacer(modifier = Modifier.height(10.dp))
                 TelegramPermissionRow(
                     title = "Send task status summaries",
                     subtitle = "Forward completion or failure notices back to Telegram.",
                     checked = config.shareTaskSummaries,
-                    onCheckedChange = { onUpdatePermissions(null, null, it) }
+                    onCheckedChange = {
+                        haptic.performToggle()
+                        onUpdatePermissions(null, null, it)
+                    }
                 )
             }
         }
@@ -245,6 +249,7 @@ private fun TelegramPermissionRow(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit
 ) {
+    val colors = NexaTheme.colors
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -254,20 +259,20 @@ private fun TelegramPermissionRow(
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleSmall,
-                color = NexaTextPrimary
+                color = colors.textPrimary
             )
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.bodySmall,
-                color = NexaTextSecondary
+                color = colors.textSecondary
             )
         }
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,
             colors = SwitchDefaults.colors(
-                checkedThumbColor = NexaOnOrange,
-                checkedTrackColor = NexaOrange
+                checkedThumbColor = colors.onOrange,
+                checkedTrackColor = colors.orange
             )
         )
     }

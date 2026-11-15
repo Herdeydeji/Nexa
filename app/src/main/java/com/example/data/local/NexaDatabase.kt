@@ -16,7 +16,7 @@ import com.example.domain.model.AgentTaskStatus
         AgentTaskEntity::class,
         TaskStepEntity::class
     ],
-    version = 3,
+    version = 5,
     exportSchema = false
 )
 @TypeConverters(NexaTypeConverters::class)
@@ -29,12 +29,21 @@ abstract class NexaDatabase : RoomDatabase() {
         val tDao = taskDao()
         val now = System.currentTimeMillis()
         convDao.removePreviewConversations()
-        // Any live task left in RUNNING/AWAITING_APPROVAL/PAUSED from a killed process is reconciled honestly.
+        // Any live task left in an active/waiting state from a killed process is reconciled honestly.
         tDao.getActiveLiveTasks().forEach { stale ->
+            val wasUnlockWait = stale.status == AgentTaskStatus.WAITING_FOR_USER_UNLOCK
             tDao.updateTaskOutcome(
                 taskId = stale.id,
-                status = AgentTaskStatus.FAILED,
-                failureReason = "Interrupted before completion when the app restarted.",
+                status = if (wasUnlockWait && stale.resumableSnapshotJson != null) {
+                    AgentTaskStatus.PAUSED
+                } else {
+                    AgentTaskStatus.FAILED
+                },
+                failureReason = if (wasUnlockWait && stale.resumableSnapshotJson != null) {
+                    "AppLock wait was interrupted when the app closed. Re-run or resume when unlocked."
+                } else {
+                    "Interrupted before completion when the app restarted."
+                },
                 summaryMessage = stale.summaryMessage,
                 verificationJson = stale.verificationJson,
                 updatedAt = now
@@ -72,13 +81,26 @@ abstract class NexaDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_3_4: Migration = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE agent_tasks ADD COLUMN resumableSnapshotJson TEXT")
+            }
+        }
+
+        val MIGRATION_4_5: Migration = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE conversations ADD COLUMN preferredProviderId TEXT")
+                db.execSQL("ALTER TABLE conversations ADD COLUMN preferredModelId TEXT")
+            }
+        }
+
         fun build(context: Context): NexaDatabase {
             return Room.databaseBuilder(
                 context.applicationContext,
                 NexaDatabase::class.java,
                 "nexa_phase1.db"
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .build()
         }
     }

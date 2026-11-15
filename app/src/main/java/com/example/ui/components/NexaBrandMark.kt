@@ -17,21 +17,20 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import com.example.ui.theme.NexaBorder
-import com.example.ui.theme.NexaElevatedSurface
-import com.example.ui.theme.NexaOrange
+import com.example.ui.theme.NexaTheme
 
 @Composable
 fun NexaBrandMark(
     modifier: Modifier = Modifier,
     size: Dp = 32.dp
 ) {
+    val colors = NexaTheme.colors
     Box(
         modifier = modifier
             .size(size)
             .clip(RoundedCornerShape(9.dp))
-            .background(NexaElevatedSurface)
-            .border(1.dp, NexaBorder, RoundedCornerShape(9.dp)),
+            .background(colors.elevatedSurface)
+            .border(1.dp, colors.border, RoundedCornerShape(9.dp)),
         contentAlignment = Alignment.Center
     ) {
         Canvas(modifier = Modifier.size(size * 0.58f)) {
@@ -47,7 +46,7 @@ fun NexaBrandMark(
             }
             drawPath(
                 path = path,
-                color = NexaOrange,
+                color = colors.orange,
                 style = Stroke(
                     width = strokeWidth,
                     cap = StrokeCap.Round,
@@ -56,7 +55,7 @@ fun NexaBrandMark(
             )
             // Precision apex node
             drawCircle(
-                color = NexaOrange,
+                color = colors.orange,
                 radius = strokeWidth * 0.55f,
                 center = Offset(w * 0.16f, h * 0.14f)
             )

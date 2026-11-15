@@ -54,6 +54,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.domain.model.AmbiguitySelectionRequest
 import com.example.domain.model.ExecutionPlan
 import com.example.domain.model.ExecutionStep
 import com.example.domain.model.ExecutionStepState
@@ -61,25 +62,8 @@ import com.example.domain.model.StepKind
 import com.example.domain.model.TaskSummary
 import com.example.domain.model.ToolApprovalRequest
 import com.example.domain.model.ToolRiskCategory
-import com.example.ui.theme.NexaBackground
-import com.example.ui.theme.NexaBorder
-import com.example.ui.theme.NexaElevatedSurface
-import com.example.ui.theme.NexaError
-import com.example.ui.theme.NexaErrorContainer
-import com.example.ui.theme.NexaInfo
-import com.example.ui.theme.NexaInfoContainer
-import com.example.ui.theme.NexaNeutral
-import com.example.ui.theme.NexaOnOrange
-import com.example.ui.theme.NexaOrange
-import com.example.ui.theme.NexaOrangeMuted
-import com.example.ui.theme.NexaSecondaryBackground
-import com.example.ui.theme.NexaSuccess
-import com.example.ui.theme.NexaSuccessContainer
-import com.example.ui.theme.NexaTextPrimary
-import com.example.ui.theme.NexaTextSecondary
-import com.example.ui.theme.NexaTextTertiary
-import com.example.ui.theme.NexaWarning
-import com.example.ui.theme.NexaWarningContainer
+import com.example.domain.model.UserUnlockWaitRequest
+import com.example.ui.theme.NexaTheme
 
 @Composable
 fun ExpandableAgentExecutionPanel(
@@ -88,6 +72,7 @@ fun ExpandableAgentExecutionPanel(
     showSampleBadge: Boolean = true,
     modifier: Modifier = Modifier
 ) {
+    val colors = NexaTheme.colors
     var expanded by rememberSaveable(plan.goal) { mutableStateOf(initiallyExpanded) }
     val completedCount = plan.steps.count { it.state == ExecutionStepState.COMPLETED }
     val subtitleText = if (plan.isPreview) {
@@ -105,8 +90,8 @@ fun ExpandableAgentExecutionPanel(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
-            .background(NexaSecondaryBackground)
-            .border(1.dp, NexaBorder, RoundedCornerShape(14.dp))
+            .background(colors.secondaryBackground)
+            .border(1.dp, colors.border, RoundedCornerShape(14.dp))
     ) {
         Row(
             modifier = Modifier
@@ -120,13 +105,13 @@ fun ExpandableAgentExecutionPanel(
                 modifier = Modifier
                     .size(28.dp)
                     .clip(RoundedCornerShape(8.dp))
-                    .background(NexaOrangeMuted),
+                    .background(colors.orangeMuted),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Outlined.Terminal,
                     contentDescription = null,
-                    tint = NexaOrange,
+                    tint = colors.orange,
                     modifier = Modifier.size(16.dp)
                 )
             }
@@ -139,23 +124,28 @@ fun ExpandableAgentExecutionPanel(
                     Text(
                         text = "Agent Execution Panel",
                         style = MaterialTheme.typography.titleSmall,
-                        color = NexaTextPrimary,
+                        color = colors.textPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                     if (plan.isPreview && showSampleBadge) {
                         StatusPill(
                             label = "UI PREVIEW",
-                            textColor = NexaOrange,
-                            containerColor = NexaOrangeMuted,
+                            textColor = colors.orange,
+                            containerColor = colors.orangeMuted,
                             showDot = false
                         )
                     } else if (!plan.isPreview && plan.verificationSummary != null) {
-                        val verified = plan.verificationSummary.isVerified
+                        val ver = plan.verificationSummary
+                        val fullyVerified = ver.isVerified && ver.objectiveVerified
                         StatusPill(
-                            label = if (verified) "VERIFIED" else "UNVERIFIED",
-                            textColor = if (verified) NexaSuccess else NexaWarning,
-                            containerColor = if (verified) NexaSuccessContainer else NexaWarningContainer,
+                            label = when {
+                                fullyVerified -> "VERIFIED"
+                                ver.blockedCount > 0 -> "BLOCKED"
+                                else -> "PARTIAL"
+                            },
+                            textColor = if (fullyVerified) colors.success else colors.warning,
+                            containerColor = if (fullyVerified) colors.successContainer else colors.warningContainer,
                             showDot = false
                         )
                     }
@@ -163,13 +153,13 @@ fun ExpandableAgentExecutionPanel(
                 Text(
                     text = subtitleText,
                     style = MaterialTheme.typography.bodySmall,
-                    color = NexaTextSecondary
+                    color = colors.textSecondary
                 )
             }
             Icon(
                 imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
                 contentDescription = if (expanded) "Collapse execution panel" else "Expand execution panel",
-                tint = NexaTextSecondary
+                tint = colors.textSecondary
             )
         }
 
@@ -181,9 +171,17 @@ fun ExpandableAgentExecutionPanel(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(NexaBackground.copy(alpha = 0.45f))
+                    .background(colors.background.copy(alpha = 0.45f))
                     .padding(horizontal = 14.dp, vertical = 12.dp)
             ) {
+                plan.verificationSummary?.takeIf { !plan.isPreview && it.requestedToolCalls > 0 }?.let { ver ->
+                    Text(
+                        text = "Verified: ${ver.verifiedCompletedCount} · Unverified: ${ver.unverifiedCompletedCount} · Failed: ${ver.failedCount} · Blocked: ${ver.blockedCount} · Remaining: ${ver.remainingCount}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (ver.isVerified && ver.objectiveVerified) colors.success else colors.warning
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
                 AgentActivityTimeline(steps = plan.steps)
             }
         }
@@ -195,6 +193,7 @@ fun AgentActivityTimeline(
     steps: List<ExecutionStep>,
     modifier: Modifier = Modifier
 ) {
+    val colors = NexaTheme.colors
     Column(modifier = modifier.fillMaxWidth()) {
         steps.forEachIndexed { index, step ->
             val isLast = index == steps.lastIndex
@@ -227,7 +226,7 @@ fun AgentActivityTimeline(
                             modifier = Modifier
                                 .width(1.5.dp)
                                 .height(34.dp)
-                                .background(NexaBorder)
+                                .background(colors.border)
                         )
                     }
                 }
@@ -245,7 +244,7 @@ fun AgentActivityTimeline(
                         Text(
                             text = step.title,
                             style = MaterialTheme.typography.titleSmall,
-                            color = if (step.state == ExecutionStepState.PENDING) NexaTextSecondary else NexaTextPrimary,
+                            color = if (step.state == ExecutionStepState.PENDING) colors.textSecondary else colors.textPrimary,
                             modifier = Modifier.weight(1f)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
@@ -259,7 +258,7 @@ fun AgentActivityTimeline(
                     Text(
                         text = step.detail,
                         style = MaterialTheme.typography.bodySmall,
-                        color = NexaTextSecondary
+                        color = colors.textSecondary
                     )
                     if (!step.toolName.isNullOrBlank() || !step.timestampLabel.isNullOrBlank() || step.kind != StepKind.EXECUTED) {
                         Spacer(modifier = Modifier.height(4.dp))
@@ -276,14 +275,14 @@ fun AgentActivityTimeline(
                                 Text(
                                     text = step.toolName,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = NexaTextTertiary
+                                    color = colors.textTertiary
                                 )
                             }
                             if (!step.timestampLabel.isNullOrBlank()) {
                                 Text(
                                     text = step.timestampLabel,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = NexaTextTertiary
+                                    color = colors.textTertiary
                                 )
                             }
                         }
@@ -303,17 +302,18 @@ fun ApprovalGateCard(
     approveTestTag: String = "approve_tool_button",
     rejectTestTag: String = "reject_tool_button"
 ) {
+    val colors = NexaTheme.colors
     val (riskFg, riskBg) = when (request.riskCategory) {
-        ToolRiskCategory.READ_ONLY -> NexaSuccess to NexaSuccessContainer
-        ToolRiskCategory.REVERSIBLE -> NexaInfo to NexaInfoContainer
+        ToolRiskCategory.READ_ONLY -> colors.success to colors.successContainer
+        ToolRiskCategory.REVERSIBLE -> colors.info to colors.infoContainer
         ToolRiskCategory.SENSITIVE,
-        ToolRiskCategory.EXTERNAL_SIDE_EFFECT -> NexaWarning to NexaWarningContainer
-        ToolRiskCategory.DESTRUCTIVE -> NexaError to NexaErrorContainer
+        ToolRiskCategory.EXTERNAL_SIDE_EFFECT -> colors.warning to colors.warningContainer
+        ToolRiskCategory.DESTRUCTIVE -> colors.error to colors.errorContainer
     }
     NexaSurfaceCard(
         modifier = modifier.testTag("approval_gate_card"),
-        containerColor = NexaElevatedSurface,
-        borderColor = NexaWarning.copy(alpha = 0.5f)
+        containerColor = colors.elevatedSurface,
+        borderColor = colors.warning.copy(alpha = 0.5f)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -328,13 +328,13 @@ fun ApprovalGateCard(
                 Icon(
                     imageVector = Icons.Outlined.Shield,
                     contentDescription = null,
-                    tint = NexaWarning,
+                    tint = colors.warning,
                     modifier = Modifier.size(18.dp)
                 )
                 Text(
                     text = "Action Approval Required",
                     style = MaterialTheme.typography.titleSmall,
-                    color = NexaTextPrimary
+                    color = colors.textPrimary
                 )
             }
             StatusPill(
@@ -349,27 +349,27 @@ fun ApprovalGateCard(
         Text(
             text = request.intentSummary,
             style = MaterialTheme.typography.bodyMedium,
-            color = NexaTextPrimary
+            color = colors.textPrimary
         )
         Spacer(modifier = Modifier.height(6.dp))
         Text(
             text = "Tool: ${request.toolName} (${request.toolId}) · ${if (request.isReversible) "Reversible" else "Non-reversible"}",
             style = MaterialTheme.typography.labelSmall,
-            color = NexaTextSecondary
+            color = colors.textSecondary
         )
         if (request.argumentsPreview.isNotBlank()) {
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = "Parameters: ${request.argumentsPreview}",
                 style = MaterialTheme.typography.bodySmall,
-                color = NexaTextSecondary
+                color = colors.textSecondary
             )
         }
         Spacer(modifier = Modifier.height(4.dp))
         Text(
             text = request.approvalEffect,
             style = MaterialTheme.typography.bodySmall,
-            color = NexaTextTertiary
+            color = colors.textTertiary
         )
         Spacer(modifier = Modifier.height(12.dp))
         Row(
@@ -394,8 +394,8 @@ fun ApprovalGateCard(
                     .heightIn(min = 48.dp)
                     .testTag(approveTestTag),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = NexaOrange,
-                    contentColor = NexaOnOrange
+                    containerColor = colors.orange,
+                    contentColor = colors.onOrange
                 )
             ) {
                 Icon(Icons.Outlined.Check, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -407,15 +407,159 @@ fun ApprovalGateCard(
 }
 
 @Composable
+fun UnlockWaitCard(
+    request: UserUnlockWaitRequest,
+    onContinue: () -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val colors = NexaTheme.colors
+    NexaSurfaceCard(
+        modifier = modifier.testTag("unlock_wait_card"),
+        containerColor = colors.elevatedSurface,
+        borderColor = colors.warning.copy(alpha = 0.6f)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Shield,
+                    contentDescription = null,
+                    tint = colors.warning,
+                    modifier = Modifier.size(18.dp)
+                )
+                Text(
+                    text = request.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = colors.textPrimary
+                )
+            }
+            StatusPill(
+                label = if (request.manualContinueRequired) "Action Needed" else "Auto-Watching",
+                textColor = colors.warning,
+                containerColor = colors.warningContainer,
+                showDot = !request.manualContinueRequired
+            )
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = request.message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = colors.textPrimary
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = "Protected target: ${request.targetPackage} · Blocker: ${request.foregroundPackage}",
+            style = MaterialTheme.typography.labelSmall,
+            color = colors.textSecondary
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            OutlinedButton(
+                onClick = onCancel,
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 48.dp)
+                    .testTag("unlock_wait_cancel_button")
+            ) {
+                Text("Cancel", color = colors.error)
+            }
+            if (request.manualContinueRequired) {
+                Button(
+                    onClick = onContinue,
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp)
+                        .testTag("unlock_wait_continue_button"),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = colors.orange,
+                        contentColor = colors.onOrange
+                    )
+                ) {
+                    Text("Continue")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AmbiguitySelectionCard(
+    request: AmbiguitySelectionRequest,
+    onSelectCandidate: (String) -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val colors = NexaTheme.colors
+    NexaSurfaceCard(
+        modifier = modifier.testTag("ambiguity_selection_card"),
+        containerColor = colors.elevatedSurface,
+        borderColor = colors.orange.copy(alpha = 0.55f)
+    ) {
+        Text(
+            text = "Multiple apps match '${request.query}'",
+            style = MaterialTheme.typography.titleSmall,
+            color = colors.textPrimary
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = request.reason,
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.textSecondary
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            request.candidates.take(5).forEachIndexed { index, candidate ->
+                OutlinedButton(
+                    onClick = { onSelectCandidate(candidate.packageName) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .testTag("ambiguity_option_$index")
+                ) {
+                    Text(
+                        text = "${candidate.displayName} (${candidate.packageName})",
+                        color = colors.textPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = onCancel,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp)
+                .testTag("ambiguity_cancel_button")
+        ) {
+            Text("Cancel", color = colors.error)
+        }
+    }
+}
+
+@Composable
 fun TaskSummaryCard(
     summary: TaskSummary,
     onOpenTask: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val colors = NexaTheme.colors
     NexaSurfaceCard(
         modifier = modifier.testTag("task_summary_card"),
-        containerColor = NexaElevatedSurface,
-        borderColor = NexaBorder,
+        containerColor = colors.elevatedSurface,
+        borderColor = colors.border,
         onClick = { onOpenTask(summary.taskId) }
     ) {
         Row(
@@ -426,7 +570,7 @@ fun TaskSummaryCard(
             Text(
                 text = "Structured Task Summary",
                 style = MaterialTheme.typography.labelSmall,
-                color = NexaTextSecondary
+                color = colors.textSecondary
             )
             TaskStatusPill(status = summary.status)
         }
@@ -434,7 +578,7 @@ fun TaskSummaryCard(
         Text(
             text = summary.title,
             style = MaterialTheme.typography.titleSmall,
-            color = NexaTextPrimary
+            color = colors.textPrimary
         )
         Spacer(modifier = Modifier.height(4.dp))
         Row(
@@ -453,25 +597,27 @@ fun TaskSummaryCard(
                     }
                 },
                 style = MaterialTheme.typography.bodySmall,
-                color = NexaTextSecondary
+                color = colors.textSecondary
             )
             Text(
                 text = "View details ->",
                 style = MaterialTheme.typography.labelMedium,
-                color = NexaOrange
+                color = colors.orange
             )
         }
     }
 }
 
+@Composable
 private fun stepStateVisuals(state: ExecutionStepState): Pair<ImageVector, Color> {
+    val colors = NexaTheme.colors
     return when (state) {
-        ExecutionStepState.COMPLETED -> Icons.Outlined.CheckCircle to NexaSuccess
-        ExecutionStepState.RUNNING -> Icons.Outlined.PlayCircleOutline to NexaOrange
-        ExecutionStepState.PENDING -> Icons.Outlined.HourglassEmpty to NexaNeutral
-        ExecutionStepState.FAILED -> Icons.Outlined.ErrorOutline to NexaError
-        ExecutionStepState.AWAITING_CONFIRMATION -> Icons.Outlined.PauseCircleOutline to NexaWarning
-        ExecutionStepState.CANCELLED -> Icons.Outlined.Cancel to NexaNeutral
+        ExecutionStepState.COMPLETED -> Icons.Outlined.CheckCircle to colors.success
+        ExecutionStepState.RUNNING -> Icons.Outlined.PlayCircleOutline to colors.orange
+        ExecutionStepState.PENDING -> Icons.Outlined.HourglassEmpty to colors.neutral
+        ExecutionStepState.FAILED -> Icons.Outlined.ErrorOutline to colors.error
+        ExecutionStepState.AWAITING_CONFIRMATION -> Icons.Outlined.PauseCircleOutline to colors.warning
+        ExecutionStepState.CANCELLED -> Icons.Outlined.Cancel to colors.neutral
     }
 }
 

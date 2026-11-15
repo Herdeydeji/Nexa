@@ -93,6 +93,14 @@ class TasksViewModel(
         agentRunController.submitApproval(callId, ApprovalDecision.REJECT)
     }
 
+    fun continueUnlockWait() {
+        agentRunController.submitUnlockContinue()
+    }
+
+    fun selectAmbiguousApp(selectionId: String, packageName: String?) {
+        agentRunController.submitAmbiguityChoice(selectionId, packageName)
+    }
+
     fun approveSampleTask(taskId: String) {
         viewModelScope.launch {
             taskRepository.updateSampleTaskStatus(taskId, AgentTaskStatus.COMPLETED)

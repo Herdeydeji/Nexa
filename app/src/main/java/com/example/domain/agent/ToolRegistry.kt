@@ -119,7 +119,9 @@ class DefaultToolRegistry(
         DateTimeTool(),
         DeviceInfoTool(context)
     ),
-    actionRuntime: AndroidActionRuntime? = null
+    actionRuntime: AndroidActionRuntime? = null,
+    private val memoryRepository: com.example.data.repository.MemoryRepository? = null,
+    private val localMemoryEnabledProvider: () -> Boolean = { true }
 ) : ToolRegistry {
 
     private val executableTools = initialExecutableTools.toMutableList()
@@ -127,6 +129,14 @@ class DefaultToolRegistry(
     init {
         if (actionRuntime != null) {
             ComputerUseTools.createAll(actionRuntime).forEach { registerTool(it) }
+        }
+        if (memoryRepository != null) {
+            registerTool(
+                SaveMemoryNoteTool(
+                    onSaveMemory = { note, category -> memoryRepository.addMemory(note, category) },
+                    isMemoryEnabled = localMemoryEnabledProvider
+                )
+            )
         }
     }
 
@@ -222,6 +232,16 @@ class DefaultToolRegistry(
                 capabilityRequirement = requirement,
                 availabilityStatus = ToolAvailabilityStatus.UNSUPPORTED,
                 availabilityReason = "Tool '${tool.definition.name}' is not implemented in this build."
+            )
+        }
+
+        if (tool.definition.name == "save_memory_note" && !localMemoryEnabledProvider()) {
+            return RegisteredToolEntry(
+                tool = tool,
+                capabilityRequirement = CapabilityRequirement.NONE,
+                availabilityStatus = ToolAvailabilityStatus.DISABLED_BY_USER,
+                availabilityReason = "On-device context memory is disabled in Settings > Memory Settings.",
+                userEnabled = false
             )
         }
 

@@ -13,6 +13,9 @@ enum class AccessibilityRuntimeState(val label: String) {
 enum class AppLaunchStatus {
     LAUNCH_DISPATCHED,
     FOREGROUND_VERIFIED,
+    BLOCKED_BY_APPLOCK,
+    BLOCKED_BY_DIALOG,
+    APP_LOADING,
     NOT_FOUND,
     NOT_LAUNCHABLE,
     LAUNCH_FAILED
@@ -30,6 +33,12 @@ sealed interface AppLookupOutcome {
     data class Found(
         val app: InstalledAppInfo,
         val alternatives: List<InstalledAppInfo> = emptyList()
+    ) : AppLookupOutcome
+
+    data class Ambiguous(
+        val query: String,
+        val candidates: List<InstalledAppInfo>,
+        val reason: String
     ) : AppLookupOutcome
 
     data class NotLaunchable(
@@ -59,8 +68,41 @@ data class AppLaunchOutcome(
         success && launchIntentDispatched -> AppLaunchStatus.LAUNCH_DISPATCHED
         errorCode == "APP_NOT_FOUND" -> AppLaunchStatus.NOT_FOUND
         errorCode == "APP_NOT_LAUNCHABLE" -> AppLaunchStatus.NOT_LAUNCHABLE
+        errorCode == "BLOCKED_BY_APPLOCK" -> AppLaunchStatus.BLOCKED_BY_APPLOCK
+        errorCode == "BLOCKED_BY_DIALOG" -> AppLaunchStatus.BLOCKED_BY_DIALOG
+        errorCode == "APP_LOADING" -> AppLaunchStatus.APP_LOADING
         else -> AppLaunchStatus.LAUNCH_FAILED
-    }
+    },
+    val requiresUserAction: Boolean = false,
+    val recoveryAction: String? = null,
+    val blockerReason: String? = null,
+    val userTitle: String? = null,
+    val userMessage: String? = null,
+    val ambiguousCandidates: List<InstalledAppInfo> = emptyList()
+)
+
+enum class YouTubePlayStatus {
+    SEARCH_OPENED,
+    RESULTS_OBSERVED,
+    VIDEO_SELECTED,
+    PLAYBACK_STARTED,
+    PLAYBACK_UNVERIFIED,
+    BLOCKED_BY_APPLOCK,
+    FAILED
+}
+
+data class YouTubePlayOutcome(
+    val status: YouTubePlayStatus,
+    val query: String,
+    val searchUrl: String,
+    val targetPackage: String? = null,
+    val observedForegroundPackage: String? = null,
+    val selectedTitle: String? = null,
+    val selectedChannel: String? = null,
+    val playbackSignal: String? = null,
+    val message: String,
+    val launchOutcome: AppLaunchOutcome? = null,
+    val postObservation: ScreenObservation? = null
 )
 
 data class UiBounds(

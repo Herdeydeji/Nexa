@@ -5,25 +5,31 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.android.accessibility.NexaAccessibilityService
+import com.example.android.app.AndroidAppDiscovery
+import com.example.android.app.AndroidAppLauncher
 import com.example.android.media.MediaProjectionSessionManager
 import com.example.android.runtime.AndroidPermissionManager
 import com.example.data.repository.ConnectionsRepository
 import com.example.domain.model.AccessibilityRuntimeState
 import com.example.domain.model.AiProviderType
 import com.example.domain.model.CapabilityCategory
+import com.example.domain.model.CapabilityStatus
 import com.example.domain.model.DeviceCapability
+import com.example.domain.model.InstalledAppInfo
 import com.example.domain.model.MediaProjectionConsentState
 import com.example.domain.model.ProviderConfig
 import com.example.domain.model.ProviderConnectionStatus
 import com.example.domain.model.TelegramConfig
 import com.example.domain.provider.ProviderException
 import com.example.domain.security.ApiKeyMasker
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class ConnectionsSubTab(val label: String) {
     PROVIDERS("AI Providers"),
@@ -39,19 +45,29 @@ data class ConnectionsUiState(
     val telegramConfig: TelegramConfig = TelegramConfig(),
     val telegramFormError: String? = null,
     val capabilities: List<DeviceCapability> = emptyList(),
+    val totalCapabilitiesCount: Int = 0,
+    val availableCapabilitiesCount: Int = 0,
+    val actionNeededCapabilitiesCount: Int = 0,
     val capabilityFilter: CapabilityCategory? = null,
     val accessibilityState: AccessibilityRuntimeState = AccessibilityRuntimeState.SERVICE_DISABLED,
     val accessibilityReason: String = "Enable Nexa Computer-Use Service in Android Accessibility Settings.",
     val canPostNotifications: Boolean = true,
     val mediaProjectionState: MediaProjectionConsentState = MediaProjectionConsentState.NOT_GRANTED,
     val mediaProjectionReason: String = "Screen capture permission not granted. Tap Grant Screen Capture when needed.",
-    val mediaProjectionResolution: String? = null
+    val mediaProjectionResolution: String? = null,
+    val canDrawOverlays: Boolean = false,
+    val installedAppsSheetVisible: Boolean = false,
+    val installedAppsSearchQuery: String = "",
+    val discoveredApps: List<InstalledAppInfo> = emptyList(),
+    val appLaunchFeedback: String? = null
 )
 
 class ConnectionsViewModel(
     private val connectionsRepository: ConnectionsRepository,
     private val permissionManager: AndroidPermissionManager? = null,
-    private val mediaProjectionSessionManager: MediaProjectionSessionManager? = null
+    private val mediaProjectionSessionManager: MediaProjectionSessionManager? = null,
+    private val appDiscovery: AndroidAppDiscovery? = null,
+    private val appLauncher: AndroidAppLauncher? = null
 ) : ViewModel() {
 
     private val selectedTab = MutableStateFlow(ConnectionsSubTab.PROVIDERS)
@@ -61,6 +77,10 @@ class ConnectionsViewModel(
     private val telegramFormError = MutableStateFlow<String?>(null)
     private val capabilityFilter = MutableStateFlow<CapabilityCategory?>(null)
     private val capabilityRefreshTrigger = MutableStateFlow(0)
+    private val installedAppsSheetVisible = MutableStateFlow(false)
+    private val installedAppsSearchQuery = MutableStateFlow("")
+    private val discoveredApps = MutableStateFlow<List<InstalledAppInfo>>(emptyList())
+    private val appLaunchFeedback = MutableStateFlow<String?>(null)
 
     private val providerAuxFlow = combine(
         testingProviders,
@@ -68,6 +88,22 @@ class ConnectionsViewModel(
         refreshErrors
     ) { testing, refreshing, errors ->
         Triple(testing, refreshing, errors)
+    }
+
+    private data class AppsBrowserState(
+        val visible: Boolean,
+        val query: String,
+        val apps: List<InstalledAppInfo>,
+        val feedback: String?
+    )
+
+    private val appsBrowserFlow = combine(
+        installedAppsSheetVisible,
+        installedAppsSearchQuery,
+        discoveredApps,
+        appLaunchFeedback
+    ) { visible, query, apps, feedback ->
+        AppsBrowserState(visible, query, apps, feedback)
     }
 
     val uiState: StateFlow<ConnectionsUiState> = combine(
@@ -78,7 +114,8 @@ class ConnectionsViewModel(
         telegramFormError,
         connectionsRepository.capabilities,
         capabilityFilter,
-        capabilityRefreshTrigger
+        capabilityRefreshTrigger,
+        appsBrowserFlow
     ) { values ->
         val tab = values[0] as ConnectionsSubTab
         @Suppress("UNCHECKED_CAST")
@@ -90,6 +127,7 @@ class ConnectionsViewModel(
         @Suppress("UNCHECKED_CAST")
         val capabilities = values[5] as List<DeviceCapability>
         val capFilter = values[6] as CapabilityCategory?
+        val appsState = values[8] as AppsBrowserState
 
         val (testingSet, refreshingSet, errorsMap) = aux
         val enrichedProviders = providers.map { cfg ->
@@ -104,6 +142,9 @@ class ConnectionsViewModel(
         } else {
             capabilities.filter { it.type.category == capFilter }
         }
+        val totalCaps = capabilities.size
+        val availableCaps = capabilities.count { it.status == CapabilityStatus.AVAILABLE }
+        val actionNeededCaps = capabilities.count { it.status != CapabilityStatus.AVAILABLE }
 
         val permSnapshot = permissionManager?.inspect()
         val accState = permSnapshot?.accessibilityState ?: if (NexaAccessibilityService.runtimeState.value.isConnected) {
@@ -133,13 +174,21 @@ class ConnectionsViewModel(
             telegramConfig = telegram,
             telegramFormError = tgError,
             capabilities = filteredCaps,
+            totalCapabilitiesCount = totalCaps,
+            availableCapabilitiesCount = availableCaps,
+            actionNeededCapabilitiesCount = actionNeededCaps,
             capabilityFilter = capFilter,
             accessibilityState = accState,
             accessibilityReason = accReason,
             canPostNotifications = canNotify,
             mediaProjectionState = projState,
             mediaProjectionReason = projReason,
-            mediaProjectionResolution = projRes
+            mediaProjectionResolution = projRes,
+            canDrawOverlays = permSnapshot?.canDrawOverlays ?: false,
+            installedAppsSheetVisible = appsState.visible,
+            installedAppsSearchQuery = appsState.query,
+            discoveredApps = appsState.apps,
+            appLaunchFeedback = appsState.feedback
         )
     }.stateIn(
         scope = viewModelScope,
@@ -155,10 +204,57 @@ class ConnectionsViewModel(
         capabilityFilter.value = category
     }
 
+    fun openInstalledAppsSheet() {
+        installedAppsSheetVisible.value = true
+        appLaunchFeedback.value = null
+        loadDiscoveredApps(installedAppsSearchQuery.value)
+    }
+
+    fun closeInstalledAppsSheet() {
+        installedAppsSheetVisible.value = false
+    }
+
+    fun updateAppsSearchQuery(query: String) {
+        installedAppsSearchQuery.value = query
+        loadDiscoveredApps(query)
+    }
+
+    private fun loadDiscoveredApps(query: String) {
+        val discovery = appDiscovery ?: return
+        viewModelScope.launch {
+            val batch = withContext(Dispatchers.Default) {
+                discovery.listLaunchableApps(
+                    query = query.takeIf { it.isNotBlank() },
+                    includeSystemApps = true,
+                    limit = 80,
+                    offset = 0
+                )
+            }
+            discoveredApps.value = batch.apps
+        }
+    }
+
+    fun testLaunchDiscoveredApp(packageName: String) {
+        val launcher = appLauncher ?: return
+        viewModelScope.launch {
+            val outcome = withContext(Dispatchers.Default) {
+                launcher.launch(packageName)
+            }
+            appLaunchFeedback.value = outcome.message
+        }
+    }
+
+    fun dismissAppLaunchFeedback() {
+        appLaunchFeedback.value = null
+    }
+
     fun refreshCapabilities() {
         connectionsRepository.refreshCapabilities()
         capabilityRefreshTrigger.value += 1
     }
+
+    fun createOverlaySettingsIntent(): Intent? =
+        permissionManager?.buildOpenOverlaySettingsIntent()
 
     fun createScreenCaptureIntent(): Intent? =
         mediaProjectionSessionManager?.createScreenCaptureIntent()
@@ -311,14 +407,18 @@ class ConnectionsViewModel(
     class Factory(
         private val connectionsRepository: ConnectionsRepository,
         private val permissionManager: AndroidPermissionManager? = null,
-        private val mediaProjectionSessionManager: MediaProjectionSessionManager? = null
+        private val mediaProjectionSessionManager: MediaProjectionSessionManager? = null,
+        private val appDiscovery: AndroidAppDiscovery? = null,
+        private val appLauncher: AndroidAppLauncher? = null
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
             return ConnectionsViewModel(
                 connectionsRepository = connectionsRepository,
                 permissionManager = permissionManager,
-                mediaProjectionSessionManager = mediaProjectionSessionManager
+                mediaProjectionSessionManager = mediaProjectionSessionManager,
+                appDiscovery = appDiscovery,
+                appLauncher = appLauncher
             ) as T
         }
     }

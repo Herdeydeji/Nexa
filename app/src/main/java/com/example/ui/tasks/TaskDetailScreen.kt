@@ -48,16 +48,7 @@ import com.example.ui.components.NoticeBanner
 import com.example.ui.components.SampleDataBadge
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.TaskStatusPill
-import com.example.ui.theme.NexaBackground
-import com.example.ui.theme.NexaBorder
-import com.example.ui.theme.NexaBorderSubtle
-import com.example.ui.theme.NexaElevatedSurface
-import com.example.ui.theme.NexaError
-import com.example.ui.theme.NexaOnOrange
-import com.example.ui.theme.NexaOrange
-import com.example.ui.theme.NexaSecondaryBackground
-import com.example.ui.theme.NexaTextPrimary
-import com.example.ui.theme.NexaTextSecondary
+import com.example.ui.theme.NexaTheme
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -69,14 +60,15 @@ fun TaskDetailScreen(
 ) {
     val task by viewModel.observeTaskDetail(taskId).collectAsStateWithLifecycle(initialValue = null)
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val colors = NexaTheme.colors
 
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(NexaBackground)
+            .background(colors.background)
     ) {
         Surface(
-            color = NexaSecondaryBackground,
+            color = colors.secondaryBackground,
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.fillMaxWidth()) {
@@ -95,20 +87,20 @@ fun TaskDetailScreen(
                         Icon(
                             imageVector = Icons.AutoMirrored.Outlined.ArrowBack,
                             contentDescription = "Back to tasks",
-                            tint = NexaTextPrimary
+                            tint = colors.textPrimary
                         )
                     }
                     Text(
                         text = "Task Details",
                         style = MaterialTheme.typography.titleLarge,
-                        color = NexaTextPrimary
+                        color = colors.textPrimary
                     )
                 }
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(1.dp)
-                        .background(NexaBorderSubtle)
+                        .background(colors.borderSubtle)
                 )
             }
         }
@@ -143,7 +135,7 @@ fun TaskDetailScreen(
                 state.activeRunState.isRunning
 
             item(key = "overview") {
-                NexaSurfaceCard(borderColor = NexaBorder) {
+                NexaSurfaceCard(borderColor = colors.border) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -158,13 +150,13 @@ fun TaskDetailScreen(
                     Text(
                         text = currentTask.title,
                         style = MaterialTheme.typography.titleLarge,
-                        color = NexaTextPrimary
+                        color = colors.textPrimary
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
                         text = "\"${currentTask.prompt}\"",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = NexaTextSecondary
+                        color = colors.textSecondary
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     Row(
@@ -200,7 +192,7 @@ fun TaskDetailScreen(
                                     .weight(1f)
                                     .testTag("task_cancel_button")
                             ) {
-                                Text("Cancel", color = NexaError)
+                                Text("Cancel", color = colors.error)
                             }
                         }
                     }
@@ -209,17 +201,32 @@ fun TaskDetailScreen(
 
             currentTask.verificationSummary?.let { verification ->
                 item(key = "verification") {
+                    val breakdown = "Verified: ${verification.verifiedCompletedCount} · Unverified: ${verification.unverifiedCompletedCount} · Failed: ${verification.failedCount} · Blocked: ${verification.blockedCount} · Remaining: ${verification.remainingCount}"
                     NoticeBanner(
                         icon = Icons.Outlined.Info,
-                        text = verification.summaryNote,
-                        accentColor = if (verification.isVerified) com.example.ui.theme.NexaSuccess else com.example.ui.theme.NexaWarning
+                        text = "${verification.summaryNote}\n$breakdown",
+                        accentColor = if (verification.isVerified && verification.objectiveVerified) {
+                            colors.success
+                        } else {
+                            colors.warning
+                        }
+                    )
+                }
+            }
+
+            currentTask.resumableSnapshot?.let { snapshot ->
+                item(key = "resumable_snapshot") {
+                    NoticeBanner(
+                        icon = Icons.Outlined.Info,
+                        text = "Resumable wait context (${snapshot.targetAppName ?: snapshot.targetPackage}): ${snapshot.reason}",
+                        accentColor = colors.warning
                     )
                 }
             }
 
             if (currentTask.requiredCapabilities.isNotEmpty()) {
                 item(key = "capabilities") {
-                    NexaSurfaceCard(borderColor = NexaBorder) {
+                    NexaSurfaceCard(borderColor = colors.border) {
                         SectionHeader(title = "Tools & Capabilities")
                         Spacer(modifier = Modifier.height(10.dp))
                         FlowRow(
@@ -230,14 +237,14 @@ fun TaskDetailScreen(
                                 Box(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(8.dp))
-                                        .background(NexaElevatedSurface)
-                                        .border(1.dp, NexaBorder, RoundedCornerShape(8.dp))
+                                        .background(colors.elevatedSurface)
+                                        .border(1.dp, colors.border, RoundedCornerShape(8.dp))
                                         .padding(horizontal = 10.dp, vertical = 6.dp)
                                 ) {
                                     Text(
                                         text = cap,
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = NexaTextPrimary
+                                        color = colors.textPrimary
                                     )
                                 }
                             }
@@ -251,7 +258,33 @@ fun TaskDetailScreen(
                     NoticeBanner(
                         icon = Icons.Outlined.ErrorOutline,
                         text = currentTask.failureReason,
-                        accentColor = NexaError
+                        accentColor = colors.error
+                    )
+                }
+            }
+
+            val liveUnlock = state.activeRunState.waitingForUnlock?.takeIf { it.taskId == currentTask.id }
+            if (liveUnlock != null) {
+                item(key = "live_unlock_wait") {
+                    com.example.ui.components.UnlockWaitCard(
+                        request = liveUnlock,
+                        onContinue = viewModel::continueUnlockWait,
+                        onCancel = viewModel::cancelLiveTask
+                    )
+                }
+            }
+
+            val liveAmbiguity = state.activeRunState.pendingAmbiguity?.takeIf { it.taskId == currentTask.id }
+            if (liveAmbiguity != null) {
+                item(key = "live_ambiguity") {
+                    com.example.ui.components.AmbiguitySelectionCard(
+                        request = liveAmbiguity,
+                        onSelectCandidate = { selectedPkg ->
+                            viewModel.selectAmbiguousApp(liveAmbiguity.selectionId, selectedPkg)
+                        },
+                        onCancel = {
+                            viewModel.selectAmbiguousApp(liveAmbiguity.selectionId, null)
+                        }
                     )
                 }
             }
@@ -269,7 +302,7 @@ fun TaskDetailScreen(
                 }
             } else if (currentTask.isSampleData && currentTask.status == AgentTaskStatus.AWAITING_APPROVAL) {
                 item(key = "approval_actions") {
-                    NexaSurfaceCard(borderColor = NexaOrange.copy(alpha = 0.45f)) {
+                    NexaSurfaceCard(borderColor = colors.orange.copy(alpha = 0.45f)) {
                         SectionHeader(
                             title = "Confirmation Gate",
                             subtitle = "High-risk actions pause until explicitly approved."
@@ -295,8 +328,8 @@ fun TaskDetailScreen(
                                     .weight(1f)
                                     .testTag("task_approve_button"),
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = NexaOrange,
-                                    contentColor = NexaOnOrange
+                                    containerColor = colors.orange,
+                                    contentColor = colors.onOrange
                                 )
                             ) {
                                 Icon(Icons.Outlined.Check, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -309,7 +342,7 @@ fun TaskDetailScreen(
             }
 
             item(key = "timeline") {
-                NexaSurfaceCard(borderColor = NexaBorder) {
+                NexaSurfaceCard(borderColor = colors.border) {
                     SectionHeader(
                         title = "Activity Timeline",
                         subtitle = "${currentTask.steps.size} recorded steps"
@@ -328,17 +361,18 @@ private fun MetadataField(
     value: String,
     modifier: Modifier = Modifier
 ) {
+    val colors = NexaTheme.colors
     Column(modifier = modifier) {
         Text(
             text = label.uppercase(),
             style = MaterialTheme.typography.labelSmall,
-            color = NexaTextSecondary
+            color = colors.textSecondary
         )
         Spacer(modifier = Modifier.height(2.dp))
         Text(
             text = value,
             style = MaterialTheme.typography.bodyMedium,
-            color = NexaTextPrimary
+            color = colors.textPrimary
         )
     }
 }

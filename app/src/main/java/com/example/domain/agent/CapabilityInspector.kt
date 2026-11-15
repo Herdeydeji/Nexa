@@ -170,21 +170,41 @@ class AndroidCapabilityInspector(
                     CapabilityEval(CapabilityStatus.UNAVAILABLE, "Wi-Fi hardware feature not reported.")
                 } else {
                     CapabilityEval(
-                        CapabilityStatus.PERMISSION_REQUIRED,
-                        "Hardware present; Wi-Fi control uses Android system settings panels."
+                        status = CapabilityStatus.PERMISSION_REQUIRED,
+                        reason = "Hardware present; Wi-Fi control uses Android system settings panels.",
+                        badgeOverride = "Panel access"
                     )
                 }
             }
             DeviceCapabilityType.BLUETOOTH -> {
                 val hasBt = pm.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH)
                 val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+                val isAdapterEnabled = runCatching { adapter?.isEnabled }.getOrNull()
+                val hasConnectPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    hasPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                } else {
+                    true
+                }
                 when {
                     !hasBt || adapter == null ->
                         CapabilityEval(CapabilityStatus.UNAVAILABLE, "Bluetooth adapter unavailable on this device.")
+                    !hasConnectPerm ->
+                        CapabilityEval(
+                            status = CapabilityStatus.PERMISSION_REQUIRED,
+                            reason = "Bluetooth hardware present (${if (isAdapterEnabled == true) "radio on" else "radio off"}); uses system Bluetooth Settings panel.",
+                            badgeOverride = if (isAdapterEnabled == true) "Radio on" else "Permission required"
+                        )
+                    isAdapterEnabled == true ->
+                        CapabilityEval(
+                            status = CapabilityStatus.AVAILABLE,
+                            reason = "Bluetooth adapter is enabled; open Bluetooth Settings to manage paired devices.",
+                            badgeOverride = "Enabled"
+                        )
                     else ->
                         CapabilityEval(
-                            CapabilityStatus.PERMISSION_REQUIRED,
-                            "Bluetooth hardware present; BLUETOOTH_CONNECT runtime permission not requested."
+                            status = CapabilityStatus.TEMPORARILY_UNAVAILABLE,
+                            reason = "Bluetooth adapter is currently turned off. Open Bluetooth Settings to enable it.",
+                            badgeOverride = "Turned off"
                         )
                 }
             }

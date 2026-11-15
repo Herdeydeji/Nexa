@@ -8,6 +8,7 @@ enum class AgentStatus(val label: String) {
     THINKING("Thinking"),
     EXECUTING("Executing"),
     AWAITING_CONFIRMATION("Awaiting Approval"),
+    WAITING_FOR_USER("Waiting for User"),
     PAUSED("Paused"),
     OFFLINE("No Provider")
 }
@@ -64,11 +65,55 @@ data class TaskSummary(
 enum class AgentTaskStatus(val label: String) {
     RUNNING("Running"),
     AWAITING_APPROVAL("Awaiting Approval"),
+    WAITING_FOR_USER_UNLOCK("Waiting for Unlock"),
+    WAITING_FOR_PERMISSION("Waiting for Permission"),
+    WAITING_FOR_EXTERNAL_APP("In External App"),
+    VERIFYING("Verifying"),
     PAUSED("Paused"),
     COMPLETED("Completed"),
+    PARTIALLY_COMPLETED("Partially Completed"),
     FAILED("Failed"),
     CANCELLED("Cancelled")
 }
+
+@JsonClass(generateAdapter = true)
+data class ResumableTaskSnapshot(
+    val taskId: String,
+    val conversationId: String,
+    val prompt: String,
+    val targetAppName: String? = null,
+    val targetPackage: String? = null,
+    val blockedToolName: String? = null,
+    val blockedArgumentsJson: String? = null,
+    val reason: String,
+    val updatedAtMillis: Long = System.currentTimeMillis()
+)
+
+data class AmbiguityCandidateItem(
+    val displayName: String,
+    val packageName: String,
+    val isLaunchable: Boolean = true
+)
+
+data class AmbiguitySelectionRequest(
+    val selectionId: String,
+    val taskId: String,
+    val query: String,
+    val reason: String,
+    val candidates: List<AmbiguityCandidateItem>
+)
+
+data class UserUnlockWaitRequest(
+    val taskId: String,
+    val targetAppName: String,
+    val targetPackage: String,
+    val foregroundPackage: String,
+    val title: String,
+    val message: String,
+    val timeoutSeconds: Int = 180,
+    val remainingSeconds: Int = 180,
+    val manualContinueRequired: Boolean = false
+)
 
 data class AgentTask(
     val id: String,
@@ -84,6 +129,7 @@ data class AgentTask(
     val failureReason: String? = null,
     val summaryMessage: String? = null,
     val verificationSummary: TaskVerificationSummary? = null,
+    val resumableSnapshot: ResumableTaskSnapshot? = null,
     val createdAtMillis: Long,
     val updatedAtMillis: Long
 )
@@ -164,6 +210,10 @@ enum class AgentRunStatus(val label: String) {
     THINKING("Thinking"),
     SELECTING_TOOL("Selecting Tool"),
     AWAITING_APPROVAL("Awaiting Approval"),
+    WAITING_FOR_USER_UNLOCK("Waiting for Unlock"),
+    WAITING_FOR_PERMISSION("Waiting for Permission"),
+    WAITING_FOR_EXTERNAL_APP("In External App"),
+    WAITING_FOR_AMBIGUITY_CHOICE("Choose Option"),
     EXECUTING_TOOL("Executing Tool"),
     OBSERVING_RESULT("Observing Result"),
     REPLANNING("Replanning"),
@@ -189,7 +239,8 @@ data class AgentExecutionLimits(
     val taskTimeoutMillis: Long = 120_000L,
     val maxToolResultChars: Int = 8_000,
     val maxContextTokens: Int? = null,
-    val maxRepeatedIdenticalFailures: Int = 2
+    val maxRepeatedIdenticalFailures: Int = 2,
+    val noProgressRetryLimit: Int = 3
 )
 
 data class AgentExecutionContext(
@@ -232,7 +283,13 @@ data class TaskVerificationSummary(
     val timedOutCount: Int = 0,
     val cancelledCount: Int = 0,
     val isVerified: Boolean = true,
-    val summaryNote: String = ""
+    val summaryNote: String = "",
+    val totalSteps: Int = 0,
+    val verifiedCompletedCount: Int = 0,
+    val unverifiedCompletedCount: Int = 0,
+    val blockedCount: Int = 0,
+    val remainingCount: Int = 0,
+    val objectiveVerified: Boolean = isVerified
 )
 
 sealed interface AgentEvent {
@@ -284,6 +341,23 @@ sealed interface AgentEvent {
         override val taskId: String
     ) : AgentEvent
 
+    data class WaitingForUserUnlock(
+        override val taskId: String,
+        val request: UserUnlockWaitRequest
+    ) : AgentEvent
+
+    data class UserUnlockTimeoutManualContinue(
+        override val taskId: String,
+        val targetAppName: String,
+        val targetPackage: String,
+        val reason: String
+    ) : AgentEvent
+
+    data class AmbiguityChoiceRequired(
+        override val taskId: String,
+        val request: AmbiguitySelectionRequest
+    ) : AgentEvent
+
     data class IntermediateMessagesProduced(
         override val taskId: String,
         val assistantToolCalls: List<ToolCall>,
@@ -297,7 +371,8 @@ sealed interface AgentEvent {
         val plan: ExecutionPlan?,
         val verification: TaskVerificationSummary,
         val usage: TokenUsage?,
-        val taskSummary: TaskSummary?
+        val taskSummary: TaskSummary?,
+        val partiallyCompleted: Boolean = false
     ) : AgentEvent
 
     data class Failed(

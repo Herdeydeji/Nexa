@@ -1,7 +1,6 @@
 package com.example.ui.connections
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -44,22 +43,8 @@ import com.example.ui.components.NexaSurfaceCard
 import com.example.ui.components.NoticeBanner
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.StatusPill
-import com.example.ui.theme.NexaBorder
-import com.example.ui.theme.NexaElevatedSurface
-import com.example.ui.theme.NexaError
-import com.example.ui.theme.NexaErrorContainer
-import com.example.ui.theme.NexaInfo
-import com.example.ui.theme.NexaInfoContainer
-import com.example.ui.theme.NexaNeutral
-import com.example.ui.theme.NexaNeutralContainer
-import com.example.ui.theme.NexaOrange
-import com.example.ui.theme.NexaOrangeMuted
-import com.example.ui.theme.NexaSuccess
-import com.example.ui.theme.NexaSuccessContainer
-import com.example.ui.theme.NexaTextPrimary
-import com.example.ui.theme.NexaTextSecondary
-import com.example.ui.theme.NexaWarning
-import com.example.ui.theme.NexaWarningContainer
+import com.example.ui.theme.LocalNexaHapticFeedback
+import com.example.ui.theme.NexaTheme
 
 @Composable
 fun ProvidersTab(
@@ -69,6 +54,8 @@ fun ProvidersTab(
     onSetDefault: (ProviderConfig) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val colors = NexaTheme.colors
+    val haptic = LocalNexaHapticFeedback.current
     val configuredCount = providers.count {
         it.hasApiKey || (it.providerType.requiresBaseUrl && it.baseUrl.isNotBlank())
     }
@@ -84,7 +71,7 @@ fun ProvidersTab(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item(key = "providers_overview") {
-            NexaSurfaceCard(borderColor = NexaBorder) {
+            NexaSurfaceCard(borderColor = colors.border) {
                 SectionHeader(
                     title = "Model Management",
                     subtitle = "Provider adapters with Keystore-encrypted credentials & live verification"
@@ -99,7 +86,7 @@ fun ProvidersTab(
                         Text(
                             text = "Default Model",
                             style = MaterialTheme.typography.labelSmall,
-                            color = NexaTextSecondary
+                            color = colors.textSecondary
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
@@ -107,15 +94,15 @@ fun ProvidersTab(
                                 "${it.providerType.displayName} · ${it.selectedModelId ?: "Select model"}"
                             } ?: "No active default model configured",
                             style = MaterialTheme.typography.titleSmall,
-                            color = if (defaultProvider != null) NexaOrange else NexaTextPrimary,
+                            color = if (defaultProvider != null) colors.orange else colors.textPrimary,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
                     StatusPill(
                         label = "$configuredCount/${providers.size} ready",
-                        textColor = if (configuredCount > 0) NexaInfo else NexaNeutral,
-                        containerColor = if (configuredCount > 0) NexaInfoContainer else NexaNeutralContainer,
+                        textColor = if (configuredCount > 0) colors.info else colors.neutral,
+                        containerColor = if (configuredCount > 0) colors.infoContainer else colors.neutralContainer,
                         showDot = false
                     )
                 }
@@ -143,9 +130,18 @@ fun ProvidersTab(
             items(providers, key = { it.providerType.id }) { config ->
                 ProviderCard(
                     config = config,
-                    onConfigure = { onConfigureProvider(config) },
-                    onTest = { onTestProvider(config) },
-                    onSetDefault = { onSetDefault(config) }
+                    onConfigure = {
+                        haptic.performPrimary()
+                        onConfigureProvider(config)
+                    },
+                    onTest = {
+                        haptic.performPrimary()
+                        onTestProvider(config)
+                    },
+                    onSetDefault = {
+                        haptic.performConfirm()
+                        onSetDefault(config)
+                    }
                 )
             }
         }
@@ -159,12 +155,13 @@ private fun ProviderCard(
     onTest: () -> Unit,
     onSetDefault: () -> Unit
 ) {
+    val colors = NexaTheme.colors
     val canActivate = config.hasApiKey || (config.providerType.requiresBaseUrl && config.baseUrl.isNotBlank())
     val selectedModel = config.selectedModelInfo
 
     NexaSurfaceCard(
         onClick = onConfigure,
-        borderColor = if (config.isDefault) NexaOrange.copy(alpha = 0.6f) else NexaBorder,
+        borderColor = if (config.isDefault) colors.orange.copy(alpha = 0.6f) else colors.border,
         modifier = Modifier.testTag("provider_card_${config.providerType.id}")
     ) {
         Row(
@@ -180,13 +177,13 @@ private fun ProviderCard(
                     Text(
                         text = config.providerType.displayName,
                         style = MaterialTheme.typography.titleMedium,
-                        color = NexaTextPrimary
+                        color = colors.textPrimary
                     )
                     if (config.isDefault) {
                         StatusPill(
                             label = "DEFAULT",
-                            textColor = NexaOrange,
-                            containerColor = NexaOrangeMuted,
+                            textColor = colors.orange,
+                            containerColor = colors.orangeMuted,
                             showDot = false
                         )
                     }
@@ -195,7 +192,7 @@ private fun ProviderCard(
                 Text(
                     text = config.providerType.subtitle,
                     style = MaterialTheme.typography.bodySmall,
-                    color = NexaTextSecondary
+                    color = colors.textSecondary
                 )
             }
             ProviderStatusBadge(status = config.connectionStatus)
@@ -207,7 +204,7 @@ private fun ProviderCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
-                .background(NexaElevatedSurface)
+                .background(colors.elevatedSurface)
                 .padding(horizontal = 12.dp, vertical = 9.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
@@ -220,7 +217,7 @@ private fun ProviderCard(
                 Icon(
                     imageVector = Icons.Outlined.Key,
                     contentDescription = null,
-                    tint = if (config.hasApiKey) NexaOrange else NexaTextSecondary,
+                    tint = if (config.hasApiKey) colors.orange else colors.textSecondary,
                     modifier = Modifier.size(16.dp)
                 )
                 Text(
@@ -230,7 +227,7 @@ private fun ProviderCard(
                         else -> "No credential saved"
                     },
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (canActivate) NexaTextPrimary else NexaTextSecondary,
+                    color = if (canActivate) colors.textPrimary else colors.textSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -242,7 +239,7 @@ private fun ProviderCard(
                     if (selectedModel?.isManualEntry == true) append(" (Manual)")
                 },
                 style = MaterialTheme.typography.labelSmall,
-                color = NexaTextSecondary,
+                color = colors.textSecondary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -254,32 +251,32 @@ private fun ProviderCard(
                 NoticeBanner(
                     icon = Icons.Outlined.CheckCircle,
                     text = status.message,
-                    accentColor = NexaSuccess
+                    accentColor = colors.success
                 )
             }
             is ProviderConnectionStatus.AuthFailed -> {
                 Spacer(modifier = Modifier.height(8.dp))
-                NoticeBanner(icon = Icons.Outlined.ErrorOutline, text = status.message, accentColor = NexaError)
+                NoticeBanner(icon = Icons.Outlined.ErrorOutline, text = status.message, accentColor = colors.error)
             }
             is ProviderConnectionStatus.RateLimited -> {
                 Spacer(modifier = Modifier.height(8.dp))
-                NoticeBanner(icon = Icons.Outlined.Info, text = status.message, accentColor = NexaWarning)
+                NoticeBanner(icon = Icons.Outlined.Info, text = status.message, accentColor = colors.warning)
             }
             is ProviderConnectionStatus.EndpointError -> {
                 Spacer(modifier = Modifier.height(8.dp))
-                NoticeBanner(icon = Icons.Outlined.ErrorOutline, text = status.message, accentColor = NexaError)
+                NoticeBanner(icon = Icons.Outlined.ErrorOutline, text = status.message, accentColor = colors.error)
             }
             is ProviderConnectionStatus.NetworkError -> {
                 Spacer(modifier = Modifier.height(8.dp))
-                NoticeBanner(icon = Icons.Outlined.ErrorOutline, text = status.message, accentColor = NexaWarning)
+                NoticeBanner(icon = Icons.Outlined.ErrorOutline, text = status.message, accentColor = colors.warning)
             }
             is ProviderConnectionStatus.ValidationError -> {
                 Spacer(modifier = Modifier.height(8.dp))
-                NoticeBanner(icon = Icons.Outlined.ErrorOutline, text = status.message, accentColor = NexaError)
+                NoticeBanner(icon = Icons.Outlined.ErrorOutline, text = status.message, accentColor = colors.error)
             }
             is ProviderConnectionStatus.KeyInvalidated -> {
                 Spacer(modifier = Modifier.height(8.dp))
-                NoticeBanner(icon = Icons.Outlined.ErrorOutline, text = status.message, accentColor = NexaError)
+                NoticeBanner(icon = Icons.Outlined.ErrorOutline, text = status.message, accentColor = colors.error)
             }
             else -> Unit
         }
@@ -311,7 +308,7 @@ private fun ProviderCard(
                     CircularProgressIndicator(
                         modifier = Modifier.size(14.dp),
                         strokeWidth = 2.dp,
-                        color = NexaOrange
+                        color = colors.orange
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Testing...")
@@ -321,14 +318,11 @@ private fun ProviderCard(
             }
 
             if (canActivate && !config.isDefault) {
-                TextButton(
-                    onClick = onSetDefault,
-                    modifier = Modifier.clickable { onSetDefault() }
-                ) {
+                TextButton(onClick = onSetDefault) {
                     Icon(
                         imageVector = Icons.Outlined.Star,
                         contentDescription = "Set default",
-                        tint = NexaOrange,
+                        tint = colors.orange,
                         modifier = Modifier.size(16.dp)
                     )
                 }
@@ -339,17 +333,18 @@ private fun ProviderCard(
 
 @Composable
 private fun ProviderStatusBadge(status: ProviderConnectionStatus) {
+    val colors = NexaTheme.colors
     val (label, fg, bg) = when (status) {
-        ProviderConnectionStatus.NotConfigured -> Triple("Not configured", NexaNeutral, NexaNeutralContainer)
-        ProviderConnectionStatus.ConfiguredUnverified -> Triple("Saved (Unverified)", NexaWarning, NexaWarningContainer)
-        ProviderConnectionStatus.Testing -> Triple("Testing...", NexaInfo, NexaInfoContainer)
-        is ProviderConnectionStatus.Connected -> Triple("Connected", NexaSuccess, NexaSuccessContainer)
-        is ProviderConnectionStatus.AuthFailed -> Triple("Auth Failed", NexaError, NexaErrorContainer)
-        is ProviderConnectionStatus.RateLimited -> Triple("Rate Limited", NexaWarning, NexaWarningContainer)
-        is ProviderConnectionStatus.EndpointError -> Triple("Endpoint Error", NexaError, NexaErrorContainer)
-        is ProviderConnectionStatus.NetworkError -> Triple("Network Error", NexaWarning, NexaWarningContainer)
-        is ProviderConnectionStatus.ValidationError -> Triple("Error", NexaError, NexaErrorContainer)
-        is ProviderConnectionStatus.KeyInvalidated -> Triple("Key Invalidated", NexaError, NexaErrorContainer)
+        ProviderConnectionStatus.NotConfigured -> Triple("Not configured", colors.neutral, colors.neutralContainer)
+        ProviderConnectionStatus.ConfiguredUnverified -> Triple("Saved (Unverified)", colors.warning, colors.warningContainer)
+        ProviderConnectionStatus.Testing -> Triple("Testing...", colors.info, colors.infoContainer)
+        is ProviderConnectionStatus.Connected -> Triple("Connected", colors.success, colors.successContainer)
+        is ProviderConnectionStatus.AuthFailed -> Triple("Auth Failed", colors.error, colors.errorContainer)
+        is ProviderConnectionStatus.RateLimited -> Triple("Rate Limited", colors.warning, colors.warningContainer)
+        is ProviderConnectionStatus.EndpointError -> Triple("Endpoint Error", colors.error, colors.errorContainer)
+        is ProviderConnectionStatus.NetworkError -> Triple("Network Error", colors.warning, colors.warningContainer)
+        is ProviderConnectionStatus.ValidationError -> Triple("Error", colors.error, colors.errorContainer)
+        is ProviderConnectionStatus.KeyInvalidated -> Triple("Key Invalidated", colors.error, colors.errorContainer)
     }
     StatusPill(label = label, textColor = fg, containerColor = bg)
 }
