@@ -140,15 +140,20 @@ fun TaskStatusPill(status: AgentTaskStatus, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun CapabilityStatusPill(status: CapabilityStatus, modifier: Modifier = Modifier) {
+fun CapabilityStatusPill(
+    status: CapabilityStatus,
+    modifier: Modifier = Modifier,
+    labelOverride: String? = null
+) {
     val (fg, bg) = when (status) {
         CapabilityStatus.AVAILABLE -> NexaSuccess to NexaSuccessContainer
         CapabilityStatus.PERMISSION_REQUIRED -> NexaWarning to NexaWarningContainer
         CapabilityStatus.RESTRICTED -> NexaError to NexaErrorContainer
         CapabilityStatus.UNAVAILABLE -> NexaNeutral to NexaNeutralContainer
         CapabilityStatus.NOT_CONFIGURED -> NexaInfo to NexaInfoContainer
+        CapabilityStatus.TEMPORARILY_UNAVAILABLE -> NexaWarning to NexaWarningContainer
     }
-    StatusPill(label = status.label, textColor = fg, containerColor = bg, modifier = modifier)
+    StatusPill(label = labelOverride ?: status.label, textColor = fg, containerColor = bg, modifier = modifier)
 }
 
 @Composable

@@ -1,12 +1,18 @@
 package com.example.ui.connections
 
+import android.content.Intent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.android.accessibility.NexaAccessibilityService
+import com.example.android.media.MediaProjectionSessionManager
+import com.example.android.runtime.AndroidPermissionManager
 import com.example.data.repository.ConnectionsRepository
+import com.example.domain.model.AccessibilityRuntimeState
 import com.example.domain.model.AiProviderType
 import com.example.domain.model.CapabilityCategory
 import com.example.domain.model.DeviceCapability
+import com.example.domain.model.MediaProjectionConsentState
 import com.example.domain.model.ProviderConfig
 import com.example.domain.model.ProviderConnectionStatus
 import com.example.domain.model.TelegramConfig
@@ -33,11 +39,19 @@ data class ConnectionsUiState(
     val telegramConfig: TelegramConfig = TelegramConfig(),
     val telegramFormError: String? = null,
     val capabilities: List<DeviceCapability> = emptyList(),
-    val capabilityFilter: CapabilityCategory? = null
+    val capabilityFilter: CapabilityCategory? = null,
+    val accessibilityState: AccessibilityRuntimeState = AccessibilityRuntimeState.SERVICE_DISABLED,
+    val accessibilityReason: String = "Enable Nexa Computer-Use Service in Android Accessibility Settings.",
+    val canPostNotifications: Boolean = true,
+    val mediaProjectionState: MediaProjectionConsentState = MediaProjectionConsentState.NOT_GRANTED,
+    val mediaProjectionReason: String = "Screen capture permission not granted. Tap Grant Screen Capture when needed.",
+    val mediaProjectionResolution: String? = null
 )
 
 class ConnectionsViewModel(
-    private val connectionsRepository: ConnectionsRepository
+    private val connectionsRepository: ConnectionsRepository,
+    private val permissionManager: AndroidPermissionManager? = null,
+    private val mediaProjectionSessionManager: MediaProjectionSessionManager? = null
 ) : ViewModel() {
 
     private val selectedTab = MutableStateFlow(ConnectionsSubTab.PROVIDERS)
@@ -91,6 +105,26 @@ class ConnectionsViewModel(
             capabilities.filter { it.type.category == capFilter }
         }
 
+        val permSnapshot = permissionManager?.inspect()
+        val accState = permSnapshot?.accessibilityState ?: if (NexaAccessibilityService.runtimeState.value.isConnected) {
+            AccessibilityRuntimeState.SERVICE_ENABLED
+        } else {
+            AccessibilityRuntimeState.SERVICE_DISABLED
+        }
+        val accReason = permSnapshot?.accessibilityReason
+            ?: "Enable Nexa Computer-Use Service in Android Accessibility Settings."
+        val canNotify = permSnapshot?.canPostNotifications ?: true
+        val projSnap = mediaProjectionSessionManager?.state?.value
+        val projState = projSnap?.consentState ?: permSnapshot?.mediaProjectionState
+            ?: MediaProjectionConsentState.NOT_GRANTED
+        val projReason = projSnap?.statusReason ?: permSnapshot?.mediaProjectionReason
+            ?: "Screen capture permission not granted. Tap Grant Screen Capture when needed."
+        val projRes = if (projSnap != null && projSnap.isSessionActive && projSnap.width > 0 && projSnap.height > 0) {
+            "${projSnap.width}x${projSnap.height}"
+        } else {
+            null
+        }
+
         ConnectionsUiState(
             selectedTab = tab,
             providers = enrichedProviders,
@@ -99,7 +133,13 @@ class ConnectionsViewModel(
             telegramConfig = telegram,
             telegramFormError = tgError,
             capabilities = filteredCaps,
-            capabilityFilter = capFilter
+            capabilityFilter = capFilter,
+            accessibilityState = accState,
+            accessibilityReason = accReason,
+            canPostNotifications = canNotify,
+            mediaProjectionState = projState,
+            mediaProjectionReason = projReason,
+            mediaProjectionResolution = projRes
         )
     }.stateIn(
         scope = viewModelScope,
@@ -116,7 +156,21 @@ class ConnectionsViewModel(
     }
 
     fun refreshCapabilities() {
+        connectionsRepository.refreshCapabilities()
         capabilityRefreshTrigger.value += 1
+    }
+
+    fun createScreenCaptureIntent(): Intent? =
+        mediaProjectionSessionManager?.createScreenCaptureIntent()
+
+    fun onMediaProjectionConsentResult(resultCode: Int, data: Intent?) {
+        mediaProjectionSessionManager?.onConsentResult(resultCode, data)
+        refreshCapabilities()
+    }
+
+    fun stopMediaProjectionSession() {
+        mediaProjectionSessionManager?.stopSession(revokedBySystem = false)
+        refreshCapabilities()
     }
 
     fun saveProviderConfig(
@@ -255,11 +309,17 @@ class ConnectionsViewModel(
     }
 
     class Factory(
-        private val connectionsRepository: ConnectionsRepository
+        private val connectionsRepository: ConnectionsRepository,
+        private val permissionManager: AndroidPermissionManager? = null,
+        private val mediaProjectionSessionManager: MediaProjectionSessionManager? = null
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return ConnectionsViewModel(connectionsRepository) as T
+            return ConnectionsViewModel(
+                connectionsRepository = connectionsRepository,
+                permissionManager = permissionManager,
+                mediaProjectionSessionManager = mediaProjectionSessionManager
+            ) as T
         }
     }
 }

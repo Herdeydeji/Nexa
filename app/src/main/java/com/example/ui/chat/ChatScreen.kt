@@ -1,23 +1,30 @@
 package com.example.ui.chat
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -25,14 +32,19 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AccessibilityNew
 import androidx.compose.material.icons.outlined.AddComment
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Screenshot
 import androidx.compose.material.icons.outlined.SettingsEthernet
+import androidx.compose.material.icons.outlined.StopCircle
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -61,8 +73,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
+import com.example.domain.agent.RegisteredToolEntry
+import com.example.domain.agent.ToolAvailabilityStatus
+import com.example.domain.model.AccessibilityRuntimeState
 import com.example.domain.model.AgentStatus
+import com.example.domain.model.CapabilityStatus
 import com.example.domain.model.ChatMessage
+import com.example.domain.model.DeviceCapability
+import com.example.domain.model.DeviceCapabilityType
+import com.example.domain.model.MediaProjectionConsentState
 import com.example.domain.model.MessageRole
 import com.example.domain.model.MessageStatus
 import com.example.domain.model.ProviderConfig
@@ -106,6 +125,10 @@ fun ChatScreen(
     val context = LocalContext.current
     val listState = rememberLazyListState()
 
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        viewModel.refreshDevicePermissions()
+    }
+
     var showHistorySheet by remember { mutableStateOf(false) }
     var showModelSheet by remember { mutableStateOf(false) }
     var showAttachmentSheet by remember { mutableStateOf(false) }
@@ -129,6 +152,32 @@ fun ChatScreen(
             val name = resolveDisplayName(context, uri) ?: "Selected file"
             val mime = context.contentResolver.getType(uri) ?: "text/plain"
             viewModel.addAttachment(name, mime, uri.toString())
+        }
+    }
+
+    val screenCaptureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        viewModel.onMediaProjectionConsentResult(result.resultCode, result.data)
+    }
+
+    val onOpenAccessibilitySettings = remember(context) {
+        {
+            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            runCatching { context.startActivity(intent) }
+            Unit
+        }
+    }
+
+    val onRequestScreenCapture = remember(viewModel, screenCaptureLauncher) {
+        {
+            val consentIntent = viewModel.createScreenCaptureIntent()
+            if (consentIntent != null) {
+                runCatching { screenCaptureLauncher.launch(consentIntent) }
+            }
+            Unit
         }
     }
 
@@ -181,8 +230,15 @@ fun ChatScreen(
             if (state.messages.isEmpty()) {
                 ChatEmptyWelcome(
                     defaultProvider = state.defaultProvider,
+                    capabilities = state.capabilities,
+                    registeredTools = state.registeredTools,
+                    accessibilityState = state.accessibilityState,
+                    mediaProjectionState = state.mediaProjectionState,
                     onPromptSelect = { prompt -> viewModel.sendMessage(prompt) },
                     onConfigureProvider = onNavigateToConnections,
+                    onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+                    onRequestScreenCapture = onRequestScreenCapture,
+                    onStopScreenCapture = viewModel::stopMediaProjectionSession,
                     modifier = Modifier.align(Alignment.Center)
                 )
             } else {
@@ -206,9 +262,14 @@ fun ChatScreen(
                             showSampleBadges = state.settings.showSampleBadges,
                             showCodeLineNumbers = state.settings.showCodeLineNumbers,
                             isResponding = state.isResponding,
+                            isAccessibilityEnabled = state.isAccessibilityEnabled,
+                            isMediaProjectionActive = state.isMediaProjectionActive,
+                            mediaProjectionState = state.mediaProjectionState,
                             onOpenTaskDetail = onOpenTaskDetail,
                             onRetry = { viewModel.retryMessage(message) },
-                            onOpenConnections = onNavigateToConnections
+                            onOpenConnections = onNavigateToConnections,
+                            onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+                            onRequestScreenCapture = onRequestScreenCapture
                         )
                     }
                 }
@@ -353,6 +414,9 @@ fun ChatScreen(
         ToolsCatalogSheet(
             tools = state.availableTools,
             executableTools = state.executableTools,
+            registeredTools = state.registeredTools,
+            onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+            onRequestScreenCapture = onRequestScreenCapture,
             onDismiss = { showToolsSheet = false }
         )
     }
@@ -474,9 +538,14 @@ private fun ChatMessageRow(
     showSampleBadges: Boolean,
     showCodeLineNumbers: Boolean,
     isResponding: Boolean,
+    isAccessibilityEnabled: Boolean,
+    isMediaProjectionActive: Boolean,
+    mediaProjectionState: MediaProjectionConsentState,
     onOpenTaskDetail: (String) -> Unit,
     onRetry: () -> Unit,
-    onOpenConnections: () -> Unit
+    onOpenConnections: () -> Unit,
+    onOpenAccessibilitySettings: () -> Unit,
+    onRequestScreenCapture: () -> Unit
 ) {
     if (message.role == MessageRole.USER) {
         Row(
@@ -596,6 +665,75 @@ private fun ChatMessageRow(
                 )
             }
 
+            val mentionsAccessibility = !isAccessibilityEnabled && (
+                message.content.contains("Accessibility", ignoreCase = true) ||
+                    message.errorMessage?.contains("Accessibility", ignoreCase = true) == true ||
+                    message.executionPlan?.steps?.any {
+                        it.detail.contains("Accessibility", ignoreCase = true)
+                    } == true
+                )
+
+            val mentionsScreenCapture = !isMediaProjectionActive &&
+                mediaProjectionState != MediaProjectionConsentState.UNSUPPORTED && (
+                    message.content.contains("screenshot", ignoreCase = true) ||
+                        message.content.contains("screen capture", ignoreCase = true) ||
+                        message.content.contains("MediaProjection", ignoreCase = true) ||
+                        message.content.contains("take_screenshot", ignoreCase = true) ||
+                        message.errorMessage?.contains("screen capture", ignoreCase = true) == true ||
+                        message.executionPlan?.steps?.any {
+                            it.detail.contains("MediaProjection", ignoreCase = true) ||
+                                it.detail.contains("screen capture", ignoreCase = true)
+                        } == true
+                    )
+
+            if ((mentionsAccessibility || mentionsScreenCapture) && message.status != MessageStatus.STREAMING) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (mentionsAccessibility) {
+                        OutlinedButton(
+                            onClick = onOpenAccessibilitySettings,
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .testTag("chat_open_accessibility_settings")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.AccessibilityNew,
+                                contentDescription = null,
+                                tint = NexaOrange,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = stringResource(R.string.open_accessibility_settings),
+                                color = NexaOrange
+                            )
+                        }
+                    }
+                    if (mentionsScreenCapture) {
+                        OutlinedButton(
+                            onClick = onRequestScreenCapture,
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .testTag("chat_grant_screen_capture")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Screenshot,
+                                contentDescription = null,
+                                tint = NexaOrange,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = stringResource(R.string.grant_screen_capture_permission),
+                                color = NexaOrange
+                            )
+                        }
+                    }
+                }
+            }
+
             if (message.status == MessageStatus.FAILED || message.status == MessageStatus.STOPPED) {
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -658,11 +796,19 @@ private fun ChatMessageRow(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ChatEmptyWelcome(
+internal fun ChatEmptyWelcome(
     defaultProvider: ProviderConfig?,
+    capabilities: List<DeviceCapability>,
+    registeredTools: List<RegisteredToolEntry>,
+    accessibilityState: AccessibilityRuntimeState,
+    mediaProjectionState: MediaProjectionConsentState,
     onPromptSelect: (String) -> Unit,
     onConfigureProvider: () -> Unit,
+    onOpenAccessibilitySettings: () -> Unit,
+    onRequestScreenCapture: () -> Unit,
+    onStopScreenCapture: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val isProviderReady = defaultProvider != null &&
@@ -670,16 +816,34 @@ private fun ChatEmptyWelcome(
         (defaultProvider.hasApiKey || defaultProvider.providerType.requiresBaseUrl) &&
         !defaultProvider.selectedModelId.isNullOrBlank()
 
-    val starters = listOf(
-        "Compare Kotlin Coroutines StateFlow vs SharedFlow with a concise example.",
-        "Help me design a resilient retry and backoff strategy for mobile API calls.",
-        "Brainstorm 5 practical architectures for local-first Android apps."
-    )
+    val availableToolCount = registeredTools.count { it.isAvailable }
+    val appLaunchCap = capabilities.firstOrNull { it.type == DeviceCapabilityType.APP_LAUNCHING }
+    val appLaunchReady = appLaunchCap?.let {
+        it.userEnabled && it.status == CapabilityStatus.AVAILABLE
+    } ?: registeredTools.any {
+        it.definition.name == "launch_app" && it.availabilityStatus == ToolAvailabilityStatus.AVAILABLE
+    }
+    val accessibilityReady = accessibilityState == AccessibilityRuntimeState.SERVICE_ENABLED
+    val captureActive = mediaProjectionState == MediaProjectionConsentState.GRANTED_ACTIVE
+
+    val starters = buildList {
+        if (appLaunchReady) {
+            add("List installed apps on this device or open YouTube.")
+        }
+        if (accessibilityReady) {
+            add("Observe the current screen and summarize interactive controls.")
+        } else {
+            add("Check device info, current date/time, and compute 18.5% tip on $124.80.")
+        }
+        add("Compare Kotlin Coroutines StateFlow vs SharedFlow with a concise example.")
+    }
 
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 24.dp),
+            .widthIn(max = 600.dp)
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 24.dp, vertical = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
@@ -691,18 +855,137 @@ private fun ChatEmptyWelcome(
         )
         Text(
             text = if (isProviderReady) {
-                "Connected to ${defaultProvider?.providerType?.displayName} (${defaultProvider?.selectedModelId?.substringAfterLast("/")}). Ask questions, share code or images, and stream live replies."
+                "Connected to ${defaultProvider?.providerType?.displayName} (${defaultProvider?.selectedModelId?.substringAfterLast("/")}) · $availableToolCount tools ready."
             } else {
                 "Connect OpenRouter, Google Gemini, OpenAI, Anthropic, or a custom compatible endpoint to start live conversations."
             },
             style = MaterialTheme.typography.bodyMedium,
             color = NexaTextSecondary
         )
+
+        FlowRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("welcome_capability_pills"),
+            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Box(modifier = Modifier.testTag("welcome_pill_utilities")) {
+                StatusPill(
+                    label = "Utilities · Ready",
+                    textColor = NexaSuccess,
+                    containerColor = NexaSuccessContainer,
+                    showDot = true
+                )
+            }
+            Box(modifier = Modifier.testTag("welcome_pill_app_launch")) {
+                StatusPill(
+                    label = if (appLaunchReady) "App Launch · Active" else "App Launch · Off",
+                    textColor = if (appLaunchReady) NexaSuccess else NexaWarning,
+                    containerColor = if (appLaunchReady) NexaSuccessContainer else NexaWarningContainer,
+                    showDot = appLaunchReady
+                )
+            }
+            Box(modifier = Modifier.testTag("welcome_pill_accessibility")) {
+                StatusPill(
+                    label = "Screen UI · ${accessibilityState.label}",
+                    textColor = if (accessibilityReady) NexaSuccess else NexaWarning,
+                    containerColor = if (accessibilityReady) NexaSuccessContainer else NexaWarningContainer,
+                    showDot = accessibilityReady
+                )
+            }
+            Box(modifier = Modifier.testTag("welcome_pill_screen_capture")) {
+                StatusPill(
+                    label = "Capture · ${mediaProjectionState.label}",
+                    textColor = when {
+                        captureActive -> NexaSuccess
+                        mediaProjectionState == MediaProjectionConsentState.UNSUPPORTED -> NexaNeutral
+                        else -> NexaWarning
+                    },
+                    containerColor = when {
+                        captureActive -> NexaSuccessContainer
+                        mediaProjectionState == MediaProjectionConsentState.UNSUPPORTED -> NexaNeutralContainer
+                        else -> NexaWarningContainer
+                    },
+                    showDot = captureActive
+                )
+            }
+        }
+
+        if (!accessibilityReady || mediaProjectionState != MediaProjectionConsentState.UNSUPPORTED) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (!accessibilityReady) {
+                    OutlinedButton(
+                        onClick = onOpenAccessibilitySettings,
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .testTag("welcome_open_accessibility_settings")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.AccessibilityNew,
+                            contentDescription = null,
+                            tint = NexaOrange,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = stringResource(R.string.open_accessibility_settings),
+                            color = NexaOrange
+                        )
+                    }
+                }
+                if (captureActive) {
+                    OutlinedButton(
+                        onClick = onStopScreenCapture,
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .testTag("welcome_stop_screen_capture")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.StopCircle,
+                            contentDescription = null,
+                            tint = NexaError,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = stringResource(R.string.stop_screen_capture),
+                            color = NexaError
+                        )
+                    }
+                } else if (mediaProjectionState != MediaProjectionConsentState.UNSUPPORTED) {
+                    OutlinedButton(
+                        onClick = onRequestScreenCapture,
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .testTag("welcome_grant_screen_capture")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Screenshot,
+                            contentDescription = null,
+                            tint = NexaOrange,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = stringResource(R.string.grant_screen_capture_permission),
+                            color = NexaOrange
+                        )
+                    }
+                }
+            }
+        }
+
         if (!isProviderReady) {
             Button(
                 onClick = onConfigureProvider,
                 modifier = Modifier
                     .fillMaxWidth()
+                    .heightIn(min = 48.dp)
                     .testTag("empty_configure_provider_button"),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = NexaOrange,
@@ -718,7 +1001,9 @@ private fun ChatEmptyWelcome(
         starters.forEach { starter ->
             OutlinedButton(
                 onClick = { onPromptSelect(starter) },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp),
                 shape = RoundedCornerShape(12.dp)
             ) {
                 Text(

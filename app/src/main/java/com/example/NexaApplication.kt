@@ -1,6 +1,18 @@
 package com.example
 
 import android.app.Application
+import com.example.android.accessibility.AccessibilityInteractionController
+import com.example.android.accessibility.AccessibilityNodeInspector
+import com.example.android.accessibility.AndroidScreenObserver
+import com.example.android.accessibility.LiveAccessibilityInteractionBackend
+import com.example.android.accessibility.LiveAccessibilityScreenBridge
+import com.example.android.app.AndroidAppDiscovery
+import com.example.android.app.AndroidAppLauncher
+import com.example.android.media.MediaProjectionSessionManager
+import com.example.android.notifications.NexaTaskNotificationManager
+import com.example.android.runtime.AndroidActionRuntime
+import com.example.android.runtime.AndroidActionVerifier
+import com.example.android.runtime.AndroidPermissionManager
 import com.example.data.local.NexaDatabase
 import com.example.data.local.NexaPreferencesDataStore
 import com.example.data.local.NexaTypeConverters
@@ -49,22 +61,69 @@ class AppContainer(application: Application) {
     val contextBuilder: ConversationContextBuilder = ConversationContextBuilder()
     val attachmentProcessor: AttachmentProcessor = AndroidAttachmentProcessor(application)
 
-    val capabilityInspector: CapabilityInspector = AndroidCapabilityInspector(application)
-    val toolRegistry: ToolRegistry = DefaultToolRegistry(context = application)
-    val safetyPolicyManager: SafetyPolicyManager = DefaultSafetyPolicyManager()
-    val toolExecutionRuntime: ToolExecutionRuntime = ToolExecutionRuntime(toolRegistry)
-    val executionRuntime: ExecutionRuntime = toolExecutionRuntime
-    val agentOrchestrator: AgentOrchestrator = Phase1AgentOrchestrator(toolRegistry, safetyPolicyManager)
-    val agentRunController: AgentRunController = AgentRunController()
+    // Phase 4: Native Android Computer-Use Engine + MediaProjection Screen Capture
+    val mediaProjectionSessionManager: MediaProjectionSessionManager = MediaProjectionSessionManager(application)
+    val permissionManager: AndroidPermissionManager = AndroidPermissionManager(
+        context = application,
+        screenshotBackend = mediaProjectionSessionManager
+    )
+    val appDiscovery: AndroidAppDiscovery = AndroidAppDiscovery(application)
+    val nodeInspector: AccessibilityNodeInspector = AccessibilityNodeInspector()
+    val screenObserver: AndroidScreenObserver = AndroidScreenObserver(
+        bridge = LiveAccessibilityScreenBridge(permissionManager, nodeInspector)
+    )
+    val actionVerifier: AndroidActionVerifier = AndroidActionVerifier(screenObserver)
+    val appLauncher: AndroidAppLauncher = AndroidAppLauncher(
+        context = application,
+        appDiscovery = appDiscovery,
+        permissionManager = permissionManager,
+        actionVerifier = actionVerifier
+    )
+    val interactionController: AccessibilityInteractionController = AccessibilityInteractionController(
+        backend = LiveAccessibilityInteractionBackend(application, nodeInspector)
+    )
+    val androidActionRuntime: AndroidActionRuntime = AndroidActionRuntime(
+        permissionManager = permissionManager,
+        appDiscovery = appDiscovery,
+        appLauncher = appLauncher,
+        screenObserver = screenObserver,
+        interactionController = interactionController,
+        actionVerifier = actionVerifier,
+        screenshotBackend = mediaProjectionSessionManager
+    )
+    val taskNotificationManager: NexaTaskNotificationManager = NexaTaskNotificationManager(
+        context = application,
+        permissionManager = permissionManager
+    )
 
+    val capabilityInspector: CapabilityInspector = AndroidCapabilityInspector(
+        context = application,
+        permissionManager = permissionManager,
+        appDiscovery = appDiscovery
+    )
+    val toolRegistry: ToolRegistry = DefaultToolRegistry(
+        context = application,
+        actionRuntime = androidActionRuntime
+    )
+    val safetyPolicyManager: SafetyPolicyManager = DefaultSafetyPolicyManager()
     val chatRepository: ChatRepository = ChatRepository(database.conversationDao(), converters)
     val taskRepository: TaskRepository = TaskRepository(database.taskDao(), converters)
     val connectionsRepository: ConnectionsRepository = ConnectionsRepository(
         prefs = preferencesDataStore,
         providerRegistry = providerRegistry,
-        capabilityInspector = capabilityInspector
+        capabilityInspector = capabilityInspector,
+        mediaProjectionSessionManager = mediaProjectionSessionManager
     )
     val settingsRepository: SettingsRepository = SettingsRepository(preferencesDataStore)
+
+    val toolExecutionRuntime: ToolExecutionRuntime = ToolExecutionRuntime(
+        toolRegistry = toolRegistry,
+        androidActionRuntime = androidActionRuntime,
+        liveCapabilitiesProvider = { connectionsRepository.latestCapabilities }
+    )
+    val executionRuntime: ExecutionRuntime = toolExecutionRuntime
+    val agentOrchestrator: AgentOrchestrator = Phase1AgentOrchestrator(toolRegistry, safetyPolicyManager)
+    val agentRunController: AgentRunController = AgentRunController()
 
     val autonomousAgentOrchestrator: AutonomousAgentOrchestrator = DefaultAutonomousAgentOrchestrator(
         connectionsRepository = connectionsRepository,

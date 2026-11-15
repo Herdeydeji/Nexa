@@ -12,7 +12,8 @@ enum class CapabilityStatus(val label: String) {
     PERMISSION_REQUIRED("Permission required"),
     RESTRICTED("Restricted"),
     UNAVAILABLE("Unavailable"),
-    NOT_CONFIGURED("Not configured")
+    NOT_CONFIGURED("Not configured"),
+    TEMPORARILY_UNAVAILABLE("Temporarily unavailable")
 }
 
 enum class DeviceCapabilityType(
@@ -24,25 +25,25 @@ enum class DeviceCapabilityType(
     APP_LAUNCHING(
         id = "app_launching",
         title = "App launching",
-        description = "Resolve and launch installed target applications via explicit intents.",
+        description = "Discover and launch installed applications via explicit launcher intents.",
         category = CapabilityCategory.AUTOMATION
     ),
     SCREEN_OBSERVATION(
         id = "screen_observation",
         title = "Screen observation",
-        description = "Inspect active window hierarchy and UI tree nodes during supervised runs.",
+        description = "Inspect active window hierarchy and UI tree nodes with sensitive-field redaction.",
         category = CapabilityCategory.AUTOMATION
     ),
     ACCESSIBILITY_INTERACTION(
         id = "accessibility_interaction",
         title = "Accessibility interaction",
-        description = "Perform tap, scroll, and text input gestures through Nexa Accessibility Service.",
+        description = "Perform tap, scroll, navigation, and text input actions through Nexa Accessibility Service.",
         category = CapabilityCategory.AUTOMATION
     ),
     BROWSER_INTERACTION(
         id = "browser_interaction",
         title = "Browser interaction",
-        description = "Open URLs and hand off structured web searches to the default browser.",
+        description = "Open web browsers and perform model-directed search or navigation.",
         category = CapabilityCategory.AUTOMATION
     ),
     WIFI(
@@ -90,13 +91,13 @@ enum class DeviceCapabilityType(
     NOTIFICATIONS(
         id = "notifications",
         title = "Notifications",
-        description = "Post task completion alerts and approval prompts.",
+        description = "Post background task progress alerts and quick Cancel controls.",
         category = CapabilityCategory.MEDIA_SENSORS
     ),
     SCREENSHOTS(
         id = "screenshots",
         title = "Screenshots",
-        description = "Capture user-approved visual context via MediaProjection in Phase 2.",
+        description = "Capture on-demand display frames after explicit Android MediaProjection screen-capture consent.",
         category = CapabilityCategory.MEDIA_SENSORS
     ),
     LOCATION(
@@ -107,9 +108,30 @@ enum class DeviceCapabilityType(
     )
 }
 
+enum class MediaProjectionConsentState(val label: String) {
+    NOT_GRANTED("Not granted"),
+    GRANTED_ACTIVE("Active session"),
+    REVOKED("Revoked"),
+    UNSUPPORTED("Unsupported")
+}
+
+data class ScreenshotCaptureOutcome(
+    val success: Boolean,
+    val filePath: String? = null,
+    val width: Int = 0,
+    val height: Int = 0,
+    val mimeType: String = "image/png",
+    val timestampMillis: Long = System.currentTimeMillis(),
+    val base64Data: String? = null,
+    val message: String,
+    val errorCode: String? = null,
+    val requiresConsent: Boolean = false
+)
+
 data class DeviceCapability(
     val type: DeviceCapabilityType,
     val status: CapabilityStatus,
     val statusReason: String,
-    val userEnabled: Boolean = false
+    val userEnabled: Boolean = false,
+    val statusBadgeOverride: String? = null
 )

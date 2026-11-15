@@ -111,8 +111,38 @@ data class ProviderConfig(
             }
 
     val effectiveSupportsTools: Boolean
-        get() = selectedModelInfo?.supportsTools == true || allowManualToolsOverride
+        get() = selectedModelInfo?.supportsTools == true ||
+            allowManualToolsOverride ||
+            isAutoToolCapableOpenRouterModel(providerType, selectedModelId)
+
+    companion object {
+        private val NON_TOOL_ID_KEYWORDS = listOf("whisper", "tts", "audio", "embedding", "moderation", "image-gen")
+
+        fun isAutoToolCapableOpenRouterModel(
+            providerType: AiProviderType,
+            modelId: String?
+        ): Boolean {
+            if (providerType != AiProviderType.OPENROUTER || modelId.isNullOrBlank()) return false
+            val lower = modelId.trim().lowercase()
+            if (NON_TOOL_ID_KEYWORDS.any { lower.contains(it) }) return false
+            return lower.endsWith(":free") || lower == "inclusionai/ling-3.2-flash:free"
+        }
+    }
 }
+
+data class ToolDispatchDiagnostic(
+    val timestampMillis: Long = System.currentTimeMillis(),
+    val providerType: AiProviderType,
+    val modelId: String,
+    val toolsEnabled: Boolean,
+    val totalRegisteredTools: Int = 0,
+    val availableToolNames: List<String> = emptyList(),
+    val unavailableToolsSummary: Map<String, String> = emptyMap(),
+    val serializedToolNames: List<String> = emptyList(),
+    val toolChoiceSent: String? = null,
+    val returnedToolCallNames: List<String> = emptyList(),
+    val responseError: String? = null
+)
 
 enum class TelegramConnectionStatus(val label: String) {
     DISCONNECTED("Not Connected"),

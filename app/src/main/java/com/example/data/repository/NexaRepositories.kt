@@ -35,11 +35,16 @@ import com.example.domain.provider.ProviderError
 import com.example.domain.provider.ProviderException
 import com.example.domain.provider.ProviderRequest
 import com.example.domain.provider.ProviderStreamEvent
+import com.example.android.accessibility.NexaAccessibilityService
+import com.example.android.media.MediaProjectionSessionManager
+import com.example.android.media.MediaProjectionSessionSnapshot
 import com.example.domain.security.DecryptResult
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import java.util.UUID
 
 class ChatRepository(
@@ -386,8 +391,15 @@ class TaskRepository(
 class ConnectionsRepository(
     private val prefs: NexaPreferencesDataStore,
     private val providerRegistry: AiProviderRegistry,
-    private val capabilityInspector: CapabilityInspector
+    private val capabilityInspector: CapabilityInspector,
+    private val mediaProjectionSessionManager: MediaProjectionSessionManager? = null
 ) {
+    private val capabilityRefreshTick = MutableStateFlow(0)
+
+    @Volatile
+    var latestCapabilities: List<DeviceCapability> = emptyList()
+        private set
+
     val providers: Flow<List<ProviderConfig>> = combine(
         prefs.providerEntries,
         prefs.defaultProviderId
@@ -462,8 +474,22 @@ class ConnectionsRepository(
 
     val telegramConfig: Flow<TelegramConfig> = prefs.telegramConfig
 
-    val capabilities: Flow<List<DeviceCapability>> = prefs.capabilityToggles.map { toggles ->
+    private val fallbackMediaProjectionFlow: Flow<MediaProjectionSessionSnapshot?> =
+        MutableStateFlow(null)
+
+    val capabilities: Flow<List<DeviceCapability>> = combine(
+        prefs.capabilityToggles,
+        capabilityRefreshTick,
+        NexaAccessibilityService.runtimeState,
+        mediaProjectionSessionManager?.state ?: fallbackMediaProjectionFlow
+    ) { toggles, _, _, _ ->
         capabilityInspector.inspectAll(toggles)
+    }.onEach { inspected ->
+        latestCapabilities = inspected
+    }
+
+    fun refreshCapabilities() {
+        capabilityRefreshTick.value += 1
     }
 
     suspend fun saveProvider(

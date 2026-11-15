@@ -119,8 +119,14 @@ class NexaPreferencesDataStore(
     }
 
     val capabilityToggles: Flow<Map<String, Boolean>> = dataStore.data.map { prefs ->
-        DeviceCapabilityType.entries.associate { cap ->
-            cap.id to (prefs[booleanPreferencesKey("cap_toggle_${cap.id}")] ?: false)
+        buildMap {
+            DeviceCapabilityType.entries.forEach { cap ->
+                val key = booleanPreferencesKey("cap_toggle_${cap.id}")
+                val stored = prefs[key]
+                if (stored != null) {
+                    put(cap.id, stored)
+                }
+            }
         }
     }
 

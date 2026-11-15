@@ -4,9 +4,13 @@ import com.example.domain.model.AiModelInfo
 import com.example.domain.model.AiProviderType
 import com.example.domain.model.ProviderConfig
 import com.example.domain.model.TokenUsage
+import com.example.domain.model.ToolDispatchDiagnostic
 import com.example.domain.security.ApiKeyMasker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.channelFlow
 
 class OpenRouterProviderAdapter(
@@ -15,7 +19,11 @@ class OpenRouterProviderAdapter(
 
     override val providerType: AiProviderType = AiProviderType.OPENROUTER
 
+    private val _lastDiagnostic = MutableStateFlow<ToolDispatchDiagnostic?>(null)
+    val lastDiagnostic: StateFlow<ToolDispatchDiagnostic?> = _lastDiagnostic.asStateFlow()
+
     override fun defaultModels(): List<AiModelInfo> = listOf(
+        AiModelInfo("inclusionai/ling-3.2-flash:free", "Ling 3.2 Flash (Free)", "128K", 128_000, supportsVision = false, supportsTools = true),
         AiModelInfo("anthropic/claude-sonnet-4", "Claude Sonnet 4 (OR)", "200K", 200_000, supportsVision = true, supportsTools = true),
         AiModelInfo("google/gemini-2.5-pro", "Gemini 2.5 Pro (OR)", "1M", 1_000_000, supportsVision = true, supportsTools = true),
         AiModelInfo("openai/gpt-4.1", "GPT-4.1 (OR)", "1M", 1_000_000, supportsVision = true, supportsTools = true),
@@ -66,7 +74,7 @@ class OpenRouterProviderAdapter(
         val baseUrl = normalizedBaseUrl(config)
             ?: return Result.failure(ProviderException(ProviderError.InvalidEndpoint("Invalid OpenRouter base URL.")))
         return httpClient.get("$baseUrl/models", authHeaders(rawApiKey), secretToSanitize = rawApiKey)
-            .map { resp -> OpenAiCompatibleJson.parseModelsArray(resp.body) }
+            .map { resp -> OpenAiCompatibleJson.parseModelsArray(resp.body, openRouterAutoTools = true) }
     }
 
     override fun streamChat(
@@ -89,11 +97,29 @@ class OpenRouterProviderAdapter(
         }
 
         val supportsVision = request.modelInfo?.supportsVision ?: false
+        val effectiveRequest = if (!request.allowTools &&
+            request.tools.isNotEmpty() &&
+            (config.effectiveSupportsTools || ProviderConfig.isAutoToolCapableOpenRouterModel(providerType, request.modelId))
+        ) {
+            request.copy(allowTools = true)
+        } else {
+            request
+        }
+
         val body = OpenAiCompatibleJson.buildChatRequestBody(
-            request = request,
+            request = effectiveRequest,
             stream = true,
             supportsVision = supportsVision,
             includeStreamUsageOption = true
+        )
+        val (serializedNames, sentToolChoice) = OpenAiCompatibleJson.extractSerializedToolNames(body)
+        _lastDiagnostic.value = ToolDispatchDiagnostic(
+            providerType = AiProviderType.OPENROUTER,
+            modelId = effectiveRequest.modelId,
+            toolsEnabled = effectiveRequest.allowTools && serializedNames.isNotEmpty(),
+            availableToolNames = effectiveRequest.tools.map { it.name },
+            serializedToolNames = serializedNames,
+            toolChoiceSent = sentToolChoice
         )
 
         var latestUsage: TokenUsage? = null
@@ -106,9 +132,9 @@ class OpenRouterProviderAdapter(
                 headers = authHeaders(rawApiKey),
                 jsonBody = body,
                 secretToSanitize = rawApiKey,
-                modelId = request.modelId,
+                modelId = effectiveRequest.modelId,
                 onFrame = { frame ->
-                    when (val parsed = OpenAiCompatibleJson.parseStreamChunk(frame.data, rawApiKey, request.modelId)) {
+                    when (val parsed = OpenAiCompatibleJson.parseStreamChunk(frame.data, rawApiKey, effectiveRequest.modelId)) {
                         is OpenAiCompatibleJson.ParsedSseChunk.Content -> {
                             if (parsed.usage != null) {
                                 latestUsage = parsed.usage
@@ -149,7 +175,7 @@ class OpenRouterProviderAdapter(
                     val parsed = OpenAiCompatibleJson.parsePlainJsonCompletionDetailed(
                         jsonText,
                         rawApiKey,
-                        request.modelId
+                        effectiveRequest.modelId
                     )
                     if (parsed.usage != null) {
                         latestUsage = parsed.usage
@@ -168,10 +194,15 @@ class OpenRouterProviderAdapter(
         val terminalErr = emittedTerminalError ?: result.exceptionOrNull()?.let {
             (it as? ProviderException)?.error ?: NexaHttpClient.mapThrowableToError(it, rawApiKey)
         }
+        val assembled = toolCallAccumulator.buildToolCalls()
+        _lastDiagnostic.value = _lastDiagnostic.value?.copy(
+            returnedToolCallNames = assembled.map { it.toolName },
+            responseError = terminalErr?.let { ApiKeyMasker.sanitizeErrorText(it.userMessage) }
+        )
+
         if (terminalErr != null) {
             send(ProviderStreamEvent.Failed(terminalErr))
         } else {
-            val assembled = toolCallAccumulator.buildToolCalls()
             if (assembled.isNotEmpty()) {
                 send(ProviderStreamEvent.ToolCallsCompleted(assembled, latestUsage))
             }

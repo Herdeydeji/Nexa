@@ -54,10 +54,11 @@ class ExampleRobolectricTest {
         assertEquals(14, caps.size)
 
         val accessibility = caps.first { it.type == DeviceCapabilityType.ACCESSIBILITY_INTERACTION }
-        assertEquals(CapabilityStatus.NOT_CONFIGURED, accessibility.status)
+        assertEquals(CapabilityStatus.PERMISSION_REQUIRED, accessibility.status)
+        assertEquals("Service disabled", accessibility.statusBadgeOverride)
 
         val screenshots = caps.first { it.type == DeviceCapabilityType.SCREENSHOTS }
-        assertEquals(CapabilityStatus.NOT_CONFIGURED, screenshots.status)
+        assertEquals(CapabilityStatus.PERMISSION_REQUIRED, screenshots.status)
     }
 
     @Test

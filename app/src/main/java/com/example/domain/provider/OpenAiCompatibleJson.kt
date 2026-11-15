@@ -416,7 +416,11 @@ internal object OpenAiCompatibleJson {
         }
     }
 
-    fun parseModelsArray(body: String, inferFromId: Boolean = false): List<AiModelInfo> {
+    fun parseModelsArray(
+        body: String,
+        inferFromId: Boolean = false,
+        openRouterAutoTools: Boolean = false
+    ): List<AiModelInfo> {
         val root = runCatching { JSONObject(body) }.getOrNull() ?: return emptyList()
         val data = root.optJSONArray("data") ?: return emptyList()
         val list = mutableListOf<AiModelInfo>()
@@ -460,7 +464,14 @@ internal object OpenAiCompatibleJson {
             }
 
             val supportsTools = when {
-                supportedParams != null -> hasToolsParam
+                supportedParams != null -> hasToolsParam || (openRouterAutoTools && lowerId.endsWith(":free"))
+                openRouterAutoTools && lowerId.endsWith(":free") -> {
+                    val excluded = lowerId.contains("audio") ||
+                        lowerId.contains("tts") ||
+                        lowerId.contains("whisper") ||
+                        lowerId.contains("embedding")
+                    !excluded
+                }
                 inferFromId -> {
                     val excluded = lowerId.contains("audio") ||
                         lowerId.contains("realtime") ||
@@ -491,5 +502,19 @@ internal object OpenAiCompatibleJson {
             )
         }
         return list
+    }
+
+    fun extractSerializedToolNames(requestBodyJson: String): Pair<List<String>, String?> {
+        val root = runCatching { JSONObject(requestBodyJson) }.getOrNull() ?: return emptyList<String>() to null
+        val toolChoice = root.optString("tool_choice").takeIf { it.isNotBlank() }
+        val toolsArr = root.optJSONArray("tools") ?: return emptyList<String>() to toolChoice
+        val names = buildList {
+            for (i in 0 until toolsArr.length()) {
+                val fn = toolsArr.optJSONObject(i)?.optJSONObject("function")
+                val name = fn?.optString("name")?.trim()
+                if (!name.isNullOrEmpty()) add(name)
+            }
+        }
+        return names to toolChoice
     }
 }

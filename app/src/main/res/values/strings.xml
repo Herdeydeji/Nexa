@@ -28,5 +28,19 @@
     <string name="connections_tab_capabilities">Capabilities</string>
 
     <string name="settings_title">Settings</string>
-    <string name="nexa_version">Phase 3 Agent Core · v1.2.0</string>
+    <string name="nexa_version">Phase 4 Computer-Use Engine · v1.3.0</string>
+
+    <string name="accessibility_service_label">Nexa Computer-Use Service</string>
+    <string name="accessibility_service_description">Allows Nexa to observe visible UI elements and perform authorized taps, typing, scrolling, and navigation when you ask it to interact with apps. Password and sensitive fields are redacted and never stored.</string>
+    <string name="open_accessibility_settings">Open Accessibility Settings</string>
+    <string name="enable_task_notifications">Enable Task Notifications</string>
+    <string name="notification_channel_agent_name">Nexa Task Execution</string>
+    <string name="notification_channel_agent_desc">Shows live step progress and a Cancel button while Nexa runs multi-step actions across apps.</string>
+
+    <string name="grant_screen_capture_permission">Grant Screen Capture</string>
+    <string name="stop_screen_capture">Stop Session</string>
+    <string name="notification_channel_capture_name">Nexa Screen Capture</string>
+    <string name="notification_channel_capture_desc">Active while MediaProjection screen capture consent is granted for on-demand visual screenshots.</string>
+    <string name="media_projection_notif_title">Nexa Screen Capture Active</string>
+    <string name="media_projection_notif_body">On-demand screenshots are enabled for this session. Tap Stop Session to revoke.</string>
 </resources>

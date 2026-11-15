@@ -1,5 +1,7 @@
 package com.example.ui.connections
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -47,6 +49,12 @@ fun ConnectionsScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var editingProviderType by remember { mutableStateOf<AiProviderType?>(null) }
+
+    val screenCaptureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        viewModel.onMediaProjectionConsentResult(result.resultCode, result.data)
+    }
 
     Column(
         modifier = modifier
@@ -135,9 +143,22 @@ fun ConnectionsScreen(
             ConnectionsSubTab.CAPABILITIES -> CapabilitiesTab(
                 capabilities = state.capabilities,
                 selectedCategory = state.capabilityFilter,
+                accessibilityState = state.accessibilityState,
+                accessibilityReason = state.accessibilityReason,
+                canPostNotifications = state.canPostNotifications,
                 onSelectCategory = viewModel::selectCapabilityCategory,
                 onRefresh = viewModel::refreshCapabilities,
-                onToggleCapability = viewModel::toggleCapabilityPreference
+                onToggleCapability = viewModel::toggleCapabilityPreference,
+                mediaProjectionState = state.mediaProjectionState,
+                mediaProjectionReason = state.mediaProjectionReason,
+                mediaProjectionResolution = state.mediaProjectionResolution,
+                onRequestScreenCapture = {
+                    val intent = viewModel.createScreenCaptureIntent()
+                    if (intent != null) {
+                        screenCaptureLauncher.launch(intent)
+                    }
+                },
+                onStopScreenCapture = viewModel::stopMediaProjectionSession
             )
         }
     }

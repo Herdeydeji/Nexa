@@ -41,6 +41,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -53,6 +54,9 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.domain.agent.AgentTool
+import com.example.domain.agent.RegisteredToolEntry
+import com.example.domain.agent.ToolAvailabilityStatus
+import com.example.domain.agent.ToolRecoveryAction
 import com.example.domain.agent.ToolRiskLevel
 import com.example.domain.model.Conversation
 import com.example.domain.model.ProviderConfig
@@ -595,13 +599,29 @@ fun VoiceInputSheet(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ToolsCatalogSheet(
-    tools: List<AgentTool>,
+    tools: List<AgentTool> = emptyList(),
     executableTools: List<com.example.domain.model.ToolDefinition> = emptyList(),
+    registeredTools: List<RegisteredToolEntry> = emptyList(),
+    onOpenAccessibilitySettings: (() -> Unit)? = null,
+    onRequestScreenCapture: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
-    val activeIds = executableTools.map { it.id }.toSet()
+    val activeCount = if (registeredTools.isNotEmpty()) {
+        registeredTools.count { it.isAvailable }
+    } else {
+        executableTools.count { it.isImplemented }
+    }
+    val registeredIds = if (registeredTools.isNotEmpty()) {
+        registeredTools.mapTo(mutableSetOf()) { it.definition.id }
+    } else {
+        executableTools.mapTo(mutableSetOf()) { it.id }
+    }
+
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
+        sheetState = sheetState,
         containerColor = NexaSecondaryBackground,
         contentColor = NexaTextPrimary
     ) {
@@ -612,70 +632,159 @@ fun ToolsCatalogSheet(
                 .padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Registered Agent Tools",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = NexaTextPrimary
+                )
+                StatusPill(
+                    label = "$activeCount ready",
+                    textColor = NexaSuccess,
+                    containerColor = NexaSuccessContainer,
+                    showDot = true
+                )
+            }
             Text(
-                text = "Registered Agent Tools",
-                style = MaterialTheme.typography.titleLarge,
-                color = NexaTextPrimary
-            )
-            Text(
-                text = "Active Phase 3 tools can be invoked dynamically by tool-capable models. Device UI automation contracts remain disabled until Phase 4.",
+                text = "Live synchronized tool catalog sent to tool-capable models. Unavailable tools show exact permission or consent requirements.",
                 style = MaterialTheme.typography.bodySmall,
                 color = NexaTextSecondary
             )
             LazyColumn(
-                modifier = Modifier.heightIn(max = 420.dp),
+                modifier = Modifier
+                    .heightIn(max = 440.dp)
+                    .testTag("tools_catalog_list"),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(executableTools, key = { "exec_${it.id}" }) { def ->
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(NexaElevatedSurface)
-                            .border(1.dp, NexaBorder, RoundedCornerShape(12.dp))
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = def.name,
-                                style = MaterialTheme.typography.titleSmall,
-                                color = NexaTextPrimary
-                            )
-                            StatusPill(
-                                label = def.riskCategory.label,
-                                textColor = NexaSuccess,
-                                containerColor = NexaSuccessContainer,
-                                showDot = false
-                            )
+                if (registeredTools.isNotEmpty()) {
+                    val sorted = registeredTools.sortedByDescending { it.isAvailable }
+                    items(sorted, key = { "reg_${it.definition.id}" }) { entry ->
+                        val def = entry.definition
+                        val (statusFg, statusBg) = when (entry.availabilityStatus) {
+                            ToolAvailabilityStatus.AVAILABLE -> NexaSuccess to NexaSuccessContainer
+                            ToolAvailabilityStatus.SETUP_REQUIRED,
+                            ToolAvailabilityStatus.CONSENT_REQUIRED,
+                            ToolAvailabilityStatus.TEMPORARILY_UNAVAILABLE -> NexaWarning to NexaWarningContainer
+                            ToolAvailabilityStatus.DISABLED_BY_USER,
+                            ToolAvailabilityStatus.UNSUPPORTED -> NexaError to NexaErrorContainer
                         }
-                        Text(
-                            text = def.description,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = NexaTextSecondary
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(NexaElevatedSurface)
+                                .border(
+                                    1.dp,
+                                    if (entry.isAvailable) NexaBorder else NexaWarning.copy(alpha = 0.45f),
+                                    RoundedCornerShape(12.dp)
+                                )
+                                .padding(12.dp)
+                                .testTag("tool_catalog_item_${def.name}"),
+                            verticalArrangement = Arrangement.spacedBy(5.dp)
                         ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = def.name,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = NexaTextPrimary,
+                                    modifier = Modifier.weight(1f, fill = false)
+                                )
+                                StatusPill(
+                                    label = entry.availabilityStatus.label,
+                                    textColor = statusFg,
+                                    containerColor = statusBg,
+                                    showDot = entry.isAvailable
+                                )
+                            }
                             Text(
-                                text = "${def.id} (${def.parameters.size} param${if (def.parameters.size == 1) "" else "s"})",
-                                style = MaterialTheme.typography.labelSmall,
+                                text = def.description,
+                                style = MaterialTheme.typography.bodySmall,
                                 color = NexaTextSecondary
                             )
                             Text(
-                                text = if (def.isImplemented) "Active (Phase 3)" else "Disabled",
+                                text = "${entry.capabilityRequirement.label} · ${def.riskCategory.label} · ${def.parameters.size} param${if (def.parameters.size == 1) "" else "s"}",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (def.isImplemented) NexaSuccess else NexaNeutral
+                                color = NexaTextSecondary
+                            )
+                            if (!entry.isAvailable) {
+                                Text(
+                                    text = entry.availabilityReason,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = NexaWarning
+                                )
+                                when (entry.recoveryAction) {
+                                    ToolRecoveryAction.OPEN_ACCESSIBILITY_SETTINGS -> if (onOpenAccessibilitySettings != null) {
+                                        OutlinedButton(
+                                            onClick = {
+                                                onDismiss()
+                                                onOpenAccessibilitySettings()
+                                            },
+                                            modifier = Modifier.testTag("tool_recovery_accessibility_${def.name}")
+                                        ) {
+                                            Text("Open Accessibility Settings", color = NexaOrange)
+                                        }
+                                    }
+                                    ToolRecoveryAction.REQUEST_MEDIA_PROJECTION -> if (onRequestScreenCapture != null) {
+                                        OutlinedButton(
+                                            onClick = {
+                                                onDismiss()
+                                                onRequestScreenCapture()
+                                            },
+                                            modifier = Modifier.testTag("tool_recovery_screen_capture_${def.name}")
+                                        ) {
+                                            Text("Grant Screen Capture", color = NexaOrange)
+                                        }
+                                    }
+                                    else -> Unit
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    items(executableTools, key = { "exec_${it.id}" }) { def ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(NexaElevatedSurface)
+                                .border(1.dp, NexaBorder, RoundedCornerShape(12.dp))
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = def.name,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = NexaTextPrimary
+                                )
+                                StatusPill(
+                                    label = def.riskCategory.label,
+                                    textColor = NexaSuccess,
+                                    containerColor = NexaSuccessContainer,
+                                    showDot = false
+                                )
+                            }
+                            Text(
+                                text = def.description,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = NexaTextSecondary
                             )
                         }
                     }
                 }
-                items(tools.filterNot { it.id in activeIds }, key = { it.id }) { tool ->
+                items(tools.filterNot { it.id in registeredIds }, key = { it.id }) { tool ->
                     val (riskFg, riskBg) = when (tool.riskLevel) {
                         ToolRiskLevel.LOW -> NexaSuccess to NexaSuccessContainer
                         ToolRiskLevel.MEDIUM -> NexaWarning to NexaWarningContainer

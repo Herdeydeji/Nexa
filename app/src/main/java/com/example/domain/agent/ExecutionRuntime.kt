@@ -1,6 +1,9 @@
 package com.example.domain.agent
 
+import com.example.android.runtime.AndroidActionRuntime
 import com.example.domain.model.AppSettings
+import com.example.domain.model.AttachmentPayload
+import com.example.domain.model.DeviceCapability
 import com.example.domain.model.ToolCall
 import com.example.domain.model.ToolCallResult
 import com.example.domain.model.ToolExecutionStatus
@@ -8,9 +11,12 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class RuntimeAction(
@@ -41,9 +47,17 @@ class Phase1StubExecutionRuntime : ExecutionRuntime {
 
 class ToolExecutionRuntime(
     private val toolRegistry: ToolRegistry,
-    private val timeoutDispatcher: CoroutineDispatcher = Dispatchers.Default
+    private val timeoutDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    private val androidActionRuntime: AndroidActionRuntime? = null,
+    private val liveCapabilitiesProvider: () -> List<DeviceCapability> = { emptyList() }
 ) : ExecutionRuntime {
-    override val isAutomationActive: Boolean = false
+    private val transientVisualAttachments = ConcurrentHashMap<String, AttachmentPayload>()
+
+    override val isAutomationActive: Boolean
+        get() = androidActionRuntime?.isAutomationActive() == true
+
+    fun consumeVisualAttachment(callId: String): AttachmentPayload? =
+        transientVisualAttachments.remove(callId)
 
     override suspend fun execute(action: RuntimeAction): RuntimeResult {
         val tool = toolRegistry.findExecutableTool(action.toolId)
@@ -69,6 +83,7 @@ class ToolExecutionRuntime(
         timeoutMillis: Long,
         maxResultChars: Int
     ): ToolCallResult {
+        currentCoroutineContext().ensureActive()
         val startMs = System.currentTimeMillis()
         val tool = toolRegistry.findExecutableTool(call.toolName)
             ?: return ToolCallResult(
@@ -91,6 +106,22 @@ class ToolExecutionRuntime(
                 errorMessage = "Tool '${call.toolName}' is not implemented in this build.",
                 durationMillis = System.currentTimeMillis() - startMs
             )
+        }
+
+        val liveCaps = liveCapabilitiesProvider()
+        if (liveCaps.isNotEmpty()) {
+            val availability = toolRegistry.getAvailability(call.toolName, liveCaps)
+            if (availability != null && !availability.isAvailable) {
+                return ToolCallResult(
+                    callId = call.id,
+                    toolName = call.toolName,
+                    status = ToolExecutionStatus.FAILED,
+                    outputJson = errorJson(availability.availabilityReason),
+                    displaySummary = "${availability.availabilityStatus.label}: ${availability.availabilityReason}",
+                    errorMessage = availability.availabilityReason,
+                    durationMillis = System.currentTimeMillis() - startMs
+                )
+            }
         }
 
         val parsedArgs = parseArgsObject(call.argumentsJson)
@@ -149,6 +180,10 @@ class ToolExecutionRuntime(
             }
             val rawJson = finalOutput.outputJson.toString()
             val (boundedJson, truncated) = boundOutput(rawJson, maxResultChars)
+            val visualAttachment = finalOutput.visualAttachment
+            if (visualAttachment != null && !finalOutput.isError) {
+                transientVisualAttachments[call.id] = visualAttachment
+            }
             val summary = if (settings.redactSensitiveStepsInLogs &&
                 tool.definition.riskCategory == com.example.domain.model.ToolRiskCategory.SENSITIVE
             ) {
@@ -156,13 +191,18 @@ class ToolExecutionRuntime(
             } else {
                 finalOutput.displaySummary
             }
+            val finalStatus = if (finalOutput.isError) {
+                ToolExecutionStatus.FAILED
+            } else {
+                ToolExecutionStatus.SUCCEEDED
+            }
             ToolCallResult(
                 callId = call.id,
                 toolName = call.toolName,
-                status = ToolExecutionStatus.SUCCEEDED,
+                status = finalStatus,
                 outputJson = boundedJson,
                 displaySummary = summary,
-                errorMessage = null,
+                errorMessage = if (finalOutput.isError) (finalOutput.errorMessage ?: summary) else null,
                 durationMillis = System.currentTimeMillis() - startMs,
                 wasTruncated = truncated
             )

@@ -105,7 +105,10 @@ fun NexaAppShell(
             attachmentProcessor = container.attachmentProcessor,
             taskRepository = container.taskRepository,
             autonomousOrchestrator = container.autonomousAgentOrchestrator,
-            agentRunController = container.agentRunController
+            agentRunController = container.agentRunController,
+            permissionManager = container.permissionManager,
+            taskNotificationManager = container.taskNotificationManager,
+            mediaProjectionSessionManager = container.mediaProjectionSessionManager
         )
     )
     val tasksViewModel: TasksViewModel = viewModel(
@@ -115,7 +118,11 @@ fun NexaAppShell(
         )
     )
     val connectionsViewModel: ConnectionsViewModel = viewModel(
-        factory = ConnectionsViewModel.Factory(container.connectionsRepository)
+        factory = ConnectionsViewModel.Factory(
+            connectionsRepository = container.connectionsRepository,
+            permissionManager = container.permissionManager,
+            mediaProjectionSessionManager = container.mediaProjectionSessionManager
+        )
     )
     val settingsViewModel: SettingsViewModel = viewModel(
         factory = SettingsViewModel.Factory(

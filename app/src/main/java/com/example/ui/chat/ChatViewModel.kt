@@ -1,8 +1,13 @@
 package com.example.ui.chat
 
+import android.content.Intent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.android.accessibility.NexaAccessibilityService
+import com.example.android.media.MediaProjectionSessionManager
+import com.example.android.notifications.NexaTaskNotificationManager
+import com.example.android.runtime.AndroidPermissionManager
 import com.example.data.repository.ChatRepository
 import com.example.data.repository.ConnectionsRepository
 import com.example.data.repository.SettingsRepository
@@ -13,11 +18,13 @@ import com.example.domain.agent.AgentTool
 import com.example.domain.agent.AutonomousAgentOrchestrator
 import com.example.domain.agent.DefaultAutonomousAgentOrchestrator
 import com.example.domain.agent.DefaultSafetyPolicyManager
+import com.example.domain.agent.RegisteredToolEntry
 import com.example.domain.agent.ToolExecutionRuntime
 import com.example.domain.agent.ToolRegistry
 import com.example.domain.chat.AttachmentProcessor
 import com.example.domain.chat.ConversationContextBuilder
 import com.example.domain.chat.SystemPromptBuilder
+import com.example.domain.model.AccessibilityRuntimeState
 import com.example.domain.model.AgentEvent
 import com.example.domain.model.AgentExecutionContext
 import com.example.domain.model.AgentRunStatus
@@ -29,9 +36,11 @@ import com.example.domain.model.AttachmentPayload
 import com.example.domain.model.ChatMessage
 import com.example.domain.model.ComposerAttachment
 import com.example.domain.model.Conversation
+import com.example.domain.model.DeviceCapability
 import com.example.domain.model.ExecutionPlan
 import com.example.domain.model.ExecutionStep
 import com.example.domain.model.ExecutionStepState
+import com.example.domain.model.MediaProjectionConsentState
 import com.example.domain.model.MessageRole
 import com.example.domain.model.MessageStatus
 import com.example.domain.model.ProviderConfig
@@ -39,6 +48,7 @@ import com.example.domain.model.StepKind
 import com.example.domain.model.TaskSummary
 import com.example.domain.model.ToolApprovalRequest
 import com.example.domain.model.ToolDefinition
+import com.example.domain.model.ToolDispatchDiagnostic
 import com.example.domain.model.ToolExecutionStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -77,7 +87,14 @@ data class ChatUiState(
     val isResponding: Boolean = false,
     val settings: AppSettings = AppSettings(),
     val availableTools: List<AgentTool> = emptyList(),
-    val executableTools: List<ToolDefinition> = emptyList()
+    val executableTools: List<ToolDefinition> = emptyList(),
+    val registeredTools: List<RegisteredToolEntry> = emptyList(),
+    val capabilities: List<DeviceCapability> = emptyList(),
+    val isAccessibilityEnabled: Boolean = false,
+    val accessibilityState: AccessibilityRuntimeState = AccessibilityRuntimeState.SERVICE_DISABLED,
+    val mediaProjectionState: MediaProjectionConsentState = MediaProjectionConsentState.NOT_GRANTED,
+    val isMediaProjectionActive: Boolean = false,
+    val lastToolDiagnostic: ToolDispatchDiagnostic? = null
 )
 
 private data class StreamingOverlay(
@@ -97,7 +114,10 @@ class ChatViewModel(
     private val attachmentProcessor: AttachmentProcessor,
     private val taskRepository: TaskRepository? = null,
     autonomousOrchestrator: AutonomousAgentOrchestrator? = null,
-    private val agentRunController: AgentRunController = AgentRunController()
+    private val agentRunController: AgentRunController = AgentRunController(),
+    private val permissionManager: AndroidPermissionManager? = null,
+    private val taskNotificationManager: NexaTaskNotificationManager? = null,
+    private val mediaProjectionSessionManager: MediaProjectionSessionManager? = null
 ) : ViewModel() {
 
     private val orchestrator: AutonomousAgentOrchestrator = autonomousOrchestrator
@@ -130,13 +150,6 @@ class ChatViewModel(
         val attachments: List<ComposerAttachment>
     )
 
-    private data class UiExtras(
-        val overlay: StreamingOverlay,
-        val notices: List<String>,
-        val settings: AppSettings,
-        val runState: ActiveAgentRunState
-    )
-
     private val chatMetaFlow = combine(
         chatRepository.conversations,
         selectedConversationId,
@@ -147,22 +160,42 @@ class ChatViewModel(
         ChatMeta(conversations, selectedId, messages, draft, attachments)
     }
 
+    private val permissionRefreshTick = MutableStateFlow(0)
+    private val lastToolDiagnosticState = MutableStateFlow<ToolDispatchDiagnostic?>(null)
+
+    private data class UiExtras(
+        val overlay: StreamingOverlay,
+        val notices: List<String>,
+        val settings: AppSettings,
+        val runState: ActiveAgentRunState,
+        val diagnostic: ToolDispatchDiagnostic?
+    )
+
     private val uiExtrasFlow = combine(
         streamingOverlay,
         attachmentNotices,
         settingsRepository.settings,
-        agentRunController.state
-    ) { overlay, notices, settings, runState ->
-        UiExtras(overlay, notices, settings, runState)
+        agentRunController.state,
+        lastToolDiagnosticState,
+        permissionRefreshTick
+    ) { values ->
+        val overlay = values[0] as StreamingOverlay
+        @Suppress("UNCHECKED_CAST")
+        val notices = values[1] as List<String>
+        val settings = values[2] as AppSettings
+        val runState = values[3] as ActiveAgentRunState
+        val diagnostic = values[4] as ToolDispatchDiagnostic?
+        UiExtras(overlay, notices, settings, runState, diagnostic)
     }
 
     val uiState: StateFlow<ChatUiState> = combine(
         chatMetaFlow,
         connectionsRepository.providers,
         connectionsRepository.defaultProvider,
+        connectionsRepository.capabilities,
         uiExtrasFlow
-    ) { meta, providers, defaultProvider, extras ->
-        val (overlay, notices, settings, runState) = extras
+    ) { meta, providers, defaultProvider, capabilities, extras ->
+        val (overlay, notices, settings, runState, diagnostic) = extras
         val liveConversations = meta.conversations.filterNot { it.isSamplePreview }
         val resolvedActive = liveConversations.firstOrNull { it.id == meta.selectedId }
             ?: liveConversations.firstOrNull()
@@ -219,6 +252,19 @@ class ChatViewModel(
             else -> AgentStatus.IDLE
         }
 
+        val permSnap = permissionManager?.inspect()
+        val accState = permSnap?.accessibilityState ?: if (NexaAccessibilityService.runtimeState.value.isConnected) {
+            AccessibilityRuntimeState.SERVICE_ENABLED
+        } else {
+            AccessibilityRuntimeState.SERVICE_DISABLED
+        }
+        val accessibilityReady = accState == AccessibilityRuntimeState.SERVICE_ENABLED
+        val projState = mediaProjectionSessionManager?.state?.value?.consentState
+            ?: permSnap?.mediaProjectionState
+            ?: MediaProjectionConsentState.NOT_GRANTED
+
+        val registered = toolRegistry.getAllRegisteredTools(capabilities)
+
         ChatUiState(
             conversations = liveConversations,
             activeConversation = resolvedActive,
@@ -238,16 +284,42 @@ class ChatViewModel(
             isResponding = overlay.isResponding,
             settings = settings,
             availableTools = toolRegistry.getAllTools(),
-            executableTools = toolRegistry.getExecutableTools().map { it.definition }
+            executableTools = registered.filter { it.isAvailable }.map { it.definition },
+            registeredTools = registered,
+            capabilities = capabilities,
+            isAccessibilityEnabled = accessibilityReady,
+            accessibilityState = accState,
+            mediaProjectionState = projState,
+            isMediaProjectionActive = projState == MediaProjectionConsentState.GRANTED_ACTIVE,
+            lastToolDiagnostic = diagnostic
         )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = ChatUiState(
             availableTools = toolRegistry.getAllTools(),
-            executableTools = toolRegistry.getExecutableTools().map { it.definition }
+            executableTools = toolRegistry.getAvailableToolDefinitions(),
+            registeredTools = toolRegistry.getAllRegisteredTools()
         )
     )
+
+    fun refreshDevicePermissions() {
+        connectionsRepository.refreshCapabilities()
+        permissionRefreshTick.value += 1
+    }
+
+    fun createScreenCaptureIntent(): Intent? =
+        mediaProjectionSessionManager?.createScreenCaptureIntent()
+
+    fun onMediaProjectionConsentResult(resultCode: Int, data: Intent?) {
+        mediaProjectionSessionManager?.onConsentResult(resultCode, data)
+        refreshDevicePermissions()
+    }
+
+    fun stopMediaProjectionSession() {
+        mediaProjectionSessionManager?.stopSession(revokedBySystem = false)
+        refreshDevicePermissions()
+    }
 
     fun onDraftChanged(value: String) {
         draftText.value = value
@@ -504,14 +576,26 @@ class ChatViewModel(
         modelId: String,
         processedAttachments: List<AttachmentPayload>
     ) {
+        connectionsRepository.refreshCapabilities()
         val settings = settingsRepository.settings.first()
         val capabilities = connectionsRepository.capabilities.first()
-        val allImplementedTools = toolRegistry.getAvailableToolDefinitions(capabilities)
+        val registeredTools = toolRegistry.getAllRegisteredTools(capabilities)
+        val allImplementedTools = registeredTools.filter { it.isAvailable }.map { it.definition }
         val availableTools = if (provider.effectiveSupportsTools) allImplementedTools else emptyList()
         val systemPrompt = systemPromptBuilder.build(
             settings = settings,
             availableTools = allImplementedTools,
-            toolsEnabledForModel = provider.effectiveSupportsTools
+            toolsEnabledForModel = provider.effectiveSupportsTools,
+            capabilities = capabilities,
+            registeredTools = registeredTools
+        )
+        lastToolDiagnosticState.value = ToolDispatchDiagnostic(
+            providerType = provider.providerType,
+            modelId = modelId,
+            toolsEnabled = provider.effectiveSupportsTools && availableTools.isNotEmpty(),
+            availableToolNames = availableTools.map { it.name },
+            serializedToolNames = availableTools.map { it.name },
+            toolChoiceSent = if (provider.effectiveSupportsTools && availableTools.isNotEmpty()) "auto" else "none"
         )
         val historySnapshot = chatRepository.getMessagesSnapshot(conversationId)
 
@@ -577,6 +661,11 @@ class ChatViewModel(
                     is AgentEvent.ToolSelected -> {
                         liveTaskCreated = true
                         event.toolCalls.forEach { usedToolNames.add(it.toolName) }
+                        taskNotificationManager?.showRunningProgress(
+                            taskId = taskId,
+                            title = userPrompt,
+                            detail = "Running ${event.toolCalls.joinToString { it.toolName }}..."
+                        )
                         taskRepository?.upsertLiveTask(
                             taskId = taskId,
                             title = userPrompt.take(64),
@@ -592,6 +681,11 @@ class ChatViewModel(
 
                     is AgentEvent.ApprovalRequired -> {
                         if (liveTaskCreated) {
+                            taskNotificationManager?.showRunningProgress(
+                                taskId = taskId,
+                                title = userPrompt,
+                                detail = "Waiting confirmation: ${event.request.intentSummary}"
+                            )
                             taskRepository?.upsertLiveTask(
                                 taskId = taskId,
                                 title = userPrompt.take(64),
@@ -608,12 +702,22 @@ class ChatViewModel(
 
                     is AgentEvent.Paused -> {
                         if (liveTaskCreated) {
+                            taskNotificationManager?.showRunningProgress(
+                                taskId = taskId,
+                                title = userPrompt,
+                                detail = "Paused by user"
+                            )
                             taskRepository?.updateLiveTaskOutcome(taskId, AgentTaskStatus.PAUSED)
                         }
                     }
 
                     is AgentEvent.Resumed -> {
                         if (liveTaskCreated) {
+                            taskNotificationManager?.showRunningProgress(
+                                taskId = taskId,
+                                title = userPrompt,
+                                detail = "Resuming..."
+                            )
                             taskRepository?.updateLiveTaskOutcome(taskId, AgentTaskStatus.RUNNING)
                         }
                     }
@@ -685,6 +789,11 @@ class ChatViewModel(
 
                     is AgentEvent.Completed -> {
                         if (liveTaskCreated) {
+                            taskNotificationManager?.showTerminalOutcome(
+                                title = userPrompt,
+                                detail = event.verification.summaryNote.ifBlank { "Task completed." },
+                                isError = false
+                            )
                             taskRepository?.upsertLiveTask(
                                 taskId = taskId,
                                 title = userPrompt.take(64),
@@ -716,6 +825,11 @@ class ChatViewModel(
 
                     is AgentEvent.Failed -> {
                         if (liveTaskCreated) {
+                            taskNotificationManager?.showTerminalOutcome(
+                                title = userPrompt,
+                                detail = event.errorMessage,
+                                isError = true
+                            )
                             taskRepository?.upsertLiveTask(
                                 taskId = taskId,
                                 title = userPrompt.take(64),
@@ -747,6 +861,11 @@ class ChatViewModel(
 
                     is AgentEvent.Cancelled -> {
                         if (liveTaskCreated) {
+                            taskNotificationManager?.showTerminalOutcome(
+                                title = userPrompt,
+                                detail = "Cancelled by user.",
+                                isError = true
+                            )
                             taskRepository?.upsertLiveTask(
                                 taskId = taskId,
                                 title = userPrompt.take(64),
@@ -776,9 +895,27 @@ class ChatViewModel(
                         )
                     }
 
-                    is AgentEvent.StatusChanged,
-                    is AgentEvent.ToolStarted,
-                    is AgentEvent.ToolCompleted -> Unit
+                    is AgentEvent.ToolStarted -> {
+                        if (liveTaskCreated) {
+                            taskNotificationManager?.showRunningProgress(
+                                taskId = taskId,
+                                title = userPrompt,
+                                detail = "Executing ${event.call.toolName}..."
+                            )
+                        }
+                    }
+
+                    is AgentEvent.ToolCompleted -> {
+                        if (liveTaskCreated) {
+                            taskNotificationManager?.showRunningProgress(
+                                taskId = taskId,
+                                title = userPrompt,
+                                detail = "${event.result.toolName}: ${event.result.displaySummary}"
+                            )
+                        }
+                    }
+
+                    is AgentEvent.StatusChanged -> Unit
                 }
             }
         } catch (ce: CancellationException) {
@@ -814,6 +951,11 @@ class ChatViewModel(
                     null
                 }
                 if (liveTaskCreated) {
+                    taskNotificationManager?.showTerminalOutcome(
+                        title = userPrompt,
+                        detail = "Cancelled by user.",
+                        isError = true
+                    )
                     taskRepository?.upsertLiveTask(
                         taskId = taskId,
                         title = userPrompt.take(64),
@@ -858,7 +1000,10 @@ class ChatViewModel(
         private val attachmentProcessor: AttachmentProcessor,
         private val taskRepository: TaskRepository? = null,
         private val autonomousOrchestrator: AutonomousAgentOrchestrator? = null,
-        private val agentRunController: AgentRunController = AgentRunController()
+        private val agentRunController: AgentRunController = AgentRunController(),
+        private val permissionManager: AndroidPermissionManager? = null,
+        private val taskNotificationManager: NexaTaskNotificationManager? = null,
+        private val mediaProjectionSessionManager: MediaProjectionSessionManager? = null
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -872,7 +1017,10 @@ class ChatViewModel(
                 attachmentProcessor = attachmentProcessor,
                 taskRepository = taskRepository,
                 autonomousOrchestrator = autonomousOrchestrator,
-                agentRunController = agentRunController
+                agentRunController = agentRunController,
+                permissionManager = permissionManager,
+                taskNotificationManager = taskNotificationManager,
+                mediaProjectionSessionManager = mediaProjectionSessionManager
             ) as T
         }
     }

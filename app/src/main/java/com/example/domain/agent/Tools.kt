@@ -7,6 +7,7 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
 import android.os.StatFs
+import com.example.domain.model.AttachmentPayload
 import com.example.domain.model.DeviceCapabilityType
 import com.example.domain.model.ToolDefinition
 import com.example.domain.model.ToolParameter
@@ -20,7 +21,10 @@ import java.util.TimeZone
 
 data class ToolExecutionOutput(
     val outputJson: JSONObject,
-    val displaySummary: String
+    val displaySummary: String,
+    val isError: Boolean = false,
+    val errorMessage: String? = null,
+    val visualAttachment: AttachmentPayload? = null
 )
 
 interface ExecutableTool {

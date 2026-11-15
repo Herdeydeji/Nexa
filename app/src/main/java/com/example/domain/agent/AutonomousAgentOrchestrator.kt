@@ -21,6 +21,7 @@ import com.example.domain.model.TaskVerificationSummary
 import com.example.domain.model.TokenUsage
 import com.example.domain.model.ToolCall
 import com.example.domain.model.ToolCallResult
+import com.example.domain.model.ToolDispatchDiagnostic
 import com.example.domain.model.ToolExecutionStatus
 import com.example.domain.provider.ProviderRequest
 import com.example.domain.provider.ProviderStreamEvent
@@ -64,7 +65,8 @@ class DefaultAutonomousAgentOrchestrator(
     private val safetyPolicyManager: SafetyPolicyManager,
     private val executionRuntime: ToolExecutionRuntime,
     private val contextBuilder: ConversationContextBuilder = ConversationContextBuilder(),
-    private val timeoutDispatcher: CoroutineDispatcher = Dispatchers.Default
+    private val timeoutDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    private val diagnosticSink: ((ToolDispatchDiagnostic) -> Unit)? = null
 ) : AutonomousAgentOrchestrator {
 
     constructor(
@@ -72,7 +74,8 @@ class DefaultAutonomousAgentOrchestrator(
         toolRegistry: ToolRegistry,
         safetyPolicyManager: SafetyPolicyManager,
         executionRuntime: ToolExecutionRuntime,
-        contextBuilder: ConversationContextBuilder = ConversationContextBuilder()
+        contextBuilder: ConversationContextBuilder = ConversationContextBuilder(),
+        diagnosticSink: ((ToolDispatchDiagnostic) -> Unit)? = null
     ) : this(
         streamCaller = ProviderStreamCaller { provider, request ->
             connectionsRepository.streamChat(provider, request)
@@ -80,7 +83,8 @@ class DefaultAutonomousAgentOrchestrator(
         toolRegistry = toolRegistry,
         safetyPolicyManager = safetyPolicyManager,
         executionRuntime = executionRuntime,
-        contextBuilder = contextBuilder
+        contextBuilder = contextBuilder,
+        diagnosticSink = diagnosticSink
     )
 
     override fun runTurn(
@@ -168,6 +172,7 @@ class DefaultAutonomousAgentOrchestrator(
             }
 
         val allowToolsForProvider = context.provider.effectiveSupportsTools && context.availableTools.isNotEmpty()
+        var pendingVisualAttachments = emptyList<AttachmentPayload>()
 
         for (iteration in 1..context.limits.maxIterations) {
             currentCoroutineContext().ensureActive()
@@ -210,11 +215,18 @@ class DefaultAutonomousAgentOrchestrator(
                 collector.send(AgentEvent.TextDelta(context.taskId, ""))
             }
 
+            val iterationAttachments = if (iteration == 1) {
+                attachments + pendingVisualAttachments
+            } else {
+                pendingVisualAttachments
+            }
+            pendingVisualAttachments = emptyList()
+
             val request = ProviderRequest(
                 modelId = modelId,
                 messages = contextResult.messages,
                 systemPrompt = context.systemPrompt,
-                attachments = if (iteration == 1) attachments else emptyList(),
+                attachments = iterationAttachments,
                 modelInfo = context.provider.selectedModelInfo,
                 tools = if (allowToolsForProvider) context.availableTools else emptyList(),
                 allowTools = allowToolsForProvider
@@ -244,6 +256,19 @@ class DefaultAutonomousAgentOrchestrator(
                     is ProviderStreamEvent.Failed -> streamFailure = streamEvent.error.userMessage
                 }
             }
+
+            diagnosticSink?.invoke(
+                ToolDispatchDiagnostic(
+                    providerType = context.provider.providerType,
+                    modelId = modelId,
+                    toolsEnabled = allowToolsForProvider,
+                    availableToolNames = request.tools.map { it.name },
+                    serializedToolNames = request.tools.map { it.name },
+                    toolChoiceSent = if (allowToolsForProvider && request.tools.isNotEmpty()) "auto" else "none",
+                    returnedToolCallNames = iterToolCalls.map { it.toolName },
+                    responseError = streamFailure
+                )
+            )
 
             state.totalUsage = mergeUsage(state.totalUsage, iterUsage)
 
@@ -546,6 +571,10 @@ class DefaultAutonomousAgentOrchestrator(
 
             turnResults.forEach { res ->
                 val content = res.outputJson ?: JSONObject().put("error", res.errorMessage ?: res.displaySummary).toString()
+                val visual = executionRuntime.consumeVisualAttachment(res.callId)
+                if (visual != null && context.provider.selectedModelInfo?.supportsVision == true) {
+                    pendingVisualAttachments = pendingVisualAttachments + visual
+                }
                 state.workingHistory.add(
                     ChatMessage(
                         id = "tmp_tool_${res.callId}_${System.nanoTime()}",
@@ -641,6 +670,11 @@ class DefaultAutonomousAgentOrchestrator(
             tool?.definition?.riskCategory == com.example.domain.model.ToolRiskCategory.SENSITIVE
         ) {
             return "Arguments redacted by privacy policy"
+        }
+        val parsed = executionRuntime.parseArgsObject(call.argumentsJson)
+        if (tool != null && parsed != null) {
+            val described = runCatching { tool.describeAction(parsed) }.getOrNull()?.trim()
+            if (!described.isNullOrEmpty()) return described.take(140)
         }
         val compact = call.argumentsJson.trim().take(120)
         return if (compact.isBlank() || compact == "{}") "No arguments" else "Args: $compact"

@@ -67,14 +67,28 @@ class DefaultSafetyPolicyManager : SafetyPolicyManager {
         settings: AppSettings
     ): ToolPolicyEvaluation {
         val def = tool.definition
-        val category = def.riskCategory
-        val mustConfirm = when (category) {
-            // Non-bypassable gates: sensitive, destructive, and external side-effect tools
-            // always require explicit human approval regardless of model prompt or auto mode.
+        if (def.name == "launch_app" && !settings.allowAppLaunchSuggestions) {
+            return ToolPolicyEvaluation.Deny(
+                "App launching is disabled in Settings > Task Permissions ('Allow app launch suggestions')."
+            )
+        }
+
+        val sensitiveTargetMatch = detectSensitiveUiTarget(def.name, args)
+        val effectiveCategory = if (sensitiveTargetMatch != null) {
+            ToolRiskCategory.EXTERNAL_SIDE_EFFECT
+        } else {
+            def.riskCategory
+        }
+
+        val mustConfirm = when (effectiveCategory) {
+            // Non-bypassable gates: sensitive, destructive, and external side-effect actions
+            // always require explicit human approval regardless of confirmation mode.
             ToolRiskCategory.SENSITIVE,
             ToolRiskCategory.DESTRUCTIVE,
             ToolRiskCategory.EXTERNAL_SIDE_EFFECT -> true
-            ToolRiskCategory.REVERSIBLE -> settings.confirmationMode != ConfirmationMode.SUPERVISED_AUTO
+            // User-chosen policy: auto-run reversible UI steps in SENSITIVE_ONLY and SUPERVISED_AUTO;
+            // only gate them when user explicitly selects ALWAYS_CONFIRM.
+            ToolRiskCategory.REVERSIBLE -> settings.confirmationMode == ConfirmationMode.ALWAYS_CONFIRM
             ToolRiskCategory.READ_ONLY -> settings.confirmationMode == ConfirmationMode.ALWAYS_CONFIRM
         }
 
@@ -83,17 +97,29 @@ class DefaultSafetyPolicyManager : SafetyPolicyManager {
         }
 
         val actionSummary = tool.describeAction(args)
-        val isReversible = category == ToolRiskCategory.READ_ONLY || category == ToolRiskCategory.REVERSIBLE
-        val approvalEffect = when (category) {
-            ToolRiskCategory.READ_ONLY -> "Allows Nexa to execute '${def.name}' and return the read-only result to the model."
-            ToolRiskCategory.REVERSIBLE -> "Allows Nexa to run this reversible action and report the observed result."
-            ToolRiskCategory.SENSITIVE -> "Grants explicit one-time approval for sensitive tool '${def.name}'."
-            ToolRiskCategory.DESTRUCTIVE -> "Grants explicit one-time approval for this potentially irreversible action."
-            ToolRiskCategory.EXTERNAL_SIDE_EFFECT -> "Permits an external side-effect action via '${def.name}'."
+        val isReversible = effectiveCategory == ToolRiskCategory.READ_ONLY ||
+            effectiveCategory == ToolRiskCategory.REVERSIBLE
+        val approvalEffect = when {
+            sensitiveTargetMatch != null ->
+                "Targets a potentially sensitive or irreversible UI action ('$sensitiveTargetMatch'). Requires explicit confirmation."
+            effectiveCategory == ToolRiskCategory.READ_ONLY ->
+                "Allows Nexa to execute '${def.name}' and return the read-only result to the model."
+            effectiveCategory == ToolRiskCategory.REVERSIBLE ->
+                "Allows Nexa to run this reversible action and report the observed result."
+            effectiveCategory == ToolRiskCategory.SENSITIVE ->
+                "Grants explicit one-time approval for sensitive tool '${def.name}'."
+            effectiveCategory == ToolRiskCategory.DESTRUCTIVE ->
+                "Grants explicit one-time approval for this potentially irreversible action."
+            else ->
+                "Permits an external side-effect action via '${def.name}'."
         }
-        val reason = "${def.name} is classified as ${category.label} and requires explicit confirmation."
+        val reason = if (sensitiveTargetMatch != null) {
+            "'${def.name}' targets '$sensitiveTargetMatch', which may trigger a message, purchase, or deletion."
+        } else {
+            "${def.name} is classified as ${effectiveCategory.label} and requires explicit confirmation."
+        }
 
-        val previewArgs = if (settings.redactSensitiveStepsInLogs && category == ToolRiskCategory.SENSITIVE) {
+        val previewArgs = if (settings.redactSensitiveStepsInLogs && effectiveCategory == ToolRiskCategory.SENSITIVE) {
             "[Redacted in preview logs]"
         } else {
             args.toString()
@@ -105,7 +131,7 @@ class DefaultSafetyPolicyManager : SafetyPolicyManager {
             callId = call.id,
             toolId = def.id,
             toolName = def.name,
-            riskCategory = category,
+            riskCategory = effectiveCategory,
             intentSummary = actionSummary,
             targetDataSummary = actionSummary,
             isReversible = isReversible,
@@ -113,5 +139,27 @@ class DefaultSafetyPolicyManager : SafetyPolicyManager {
             argumentsPreview = previewArgs
         )
         return ToolPolicyEvaluation.RequireUserApproval(request = request, reason = reason)
+    }
+
+    private fun detectSensitiveUiTarget(toolName: String, args: JSONObject): String? {
+        if (toolName !in setOf("tap_element", "long_press_element", "type_text", "press_enter")) {
+            return null
+        }
+        val fields = listOf(
+            args.optString("text"),
+            args.optString("content_description"),
+            args.optString("view_id"),
+            args.optString("hint_or_label")
+        ).joinToString(" ").trim()
+        if (fields.isEmpty()) return null
+        val match = SENSITIVE_UI_TARGET_REGEX.find(fields)
+        return match?.value
+    }
+
+    companion object {
+        private val SENSITIVE_UI_TARGET_REGEX = Regex(
+            pattern = """\b(pay|buy|purchase|checkout|place\s+order|confirm\s+payment|transfer|send\s+money|send\s+message|send\s+sms|delete|erase|remove\s+account|uninstall|call\s+now)\b""",
+            option = RegexOption.IGNORE_CASE
+        )
     }
 }
