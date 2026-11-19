@@ -1,11 +1,15 @@
 package com.example.android.overlay
 
+import com.example.domain.model.AgentExecutionPhase
 import com.example.domain.model.AmbiguityCandidateItem
+import com.example.domain.model.VerificationLevel
 
 enum class FloatingIndicatorVisualState(val label: String) {
     IDLE("Idle"),
     THINKING("Thinking"),
     EXECUTING("Executing"),
+    VERIFYING("Verifying"),
+    RECOVERING("Recovering"),
     WAITING_FOR_USER("Waiting for User"),
     BLOCKED("Blocked"),
     PAUSED("Paused"),
@@ -16,9 +20,15 @@ enum class FloatingIndicatorVisualState(val label: String) {
 data class FloatingIndicatorUiState(
     val isVisible: Boolean = false,
     val visualState: FloatingIndicatorVisualState = FloatingIndicatorVisualState.IDLE,
+    val executionPhase: AgentExecutionPhase = AgentExecutionPhase.IDLE,
     val taskId: String? = null,
     val objective: String = "",
+    val currentSubgoal: String = "",
     val currentAction: String = "",
+    val lastVerifiedAction: String? = null,
+    val nextPlannedAction: String? = null,
+    val verificationLevel: VerificationLevel? = null,
+    val failureCategoryLabel: String? = null,
     val targetAppName: String? = null,
     val foregroundApp: String? = null,
     val completedSteps: Int = 0,
@@ -26,6 +36,7 @@ data class FloatingIndicatorUiState(
     val blockerTitle: String? = null,
     val blockerMessage: String? = null,
     val showManualContinue: Boolean = false,
+    val autoExpandOnState: Boolean = false,
     val canPause: Boolean = false,
     val canResume: Boolean = false,
     val canCancel: Boolean = false,

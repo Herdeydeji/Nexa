@@ -39,6 +39,14 @@ data class MediaProjectionSessionSnapshot(
     val lastCaptureTimestampMillis: Long? = null
 )
 
+data class VolatileScreenFrame(
+    val bitmap: Bitmap,
+    val width: Int,
+    val height: Int,
+    val visionJpegBase64: String? = null,
+    val timestampMillis: Long = System.currentTimeMillis()
+)
+
 interface ScreenshotCaptureBackend {
     val state: StateFlow<MediaProjectionSessionSnapshot>
     fun isMediaProjectionSupported(): Boolean
@@ -46,6 +54,7 @@ interface ScreenshotCaptureBackend {
     fun onConsentResult(resultCode: Int, data: Intent?): Boolean
     fun stopSession(revokedBySystem: Boolean = false)
     suspend fun captureScreenshot(includeBase64: Boolean = false): ScreenshotCaptureOutcome
+    suspend fun captureVolatileFrameForAnalysis(includeVisionBase64: Boolean = true): VolatileScreenFrame? = null
 }
 
 open class MediaProjectionSessionManager(
@@ -354,6 +363,62 @@ open class MediaProjectionSessionManager(
             } finally {
                 runCatching { acquiredImage?.close() }
                 runCatching { bitmap?.recycle() }
+            }
+        }
+
+    override suspend fun captureVolatileFrameForAnalysis(includeVisionBase64: Boolean): VolatileScreenFrame? =
+        withContext(Dispatchers.IO) {
+            val snap = _state.value
+            val reader = imageReader
+            val projection = mediaProjection
+            if (!snap.isSessionActive ||
+                snap.consentState != MediaProjectionConsentState.GRANTED_ACTIVE ||
+                reader == null ||
+                projection == null
+            ) {
+                return@withContext null
+            }
+
+            var acquiredImage: Image? = null
+            try {
+                repeat(6) {
+                    acquiredImage = runCatching { reader.acquireLatestImage() }.getOrNull()
+                    if (acquiredImage != null) return@repeat
+                    delay(45L)
+                }
+                val image = acquiredImage ?: return@withContext null
+                val plane = image.planes.firstOrNull() ?: return@withContext null
+                val imgWidth = image.width.coerceAtLeast(1)
+                val imgHeight = image.height.coerceAtLeast(1)
+                val pixelStride = plane.pixelStride
+                val rowStride = plane.rowStride
+                val rowPadding = (rowStride - pixelStride * imgWidth).coerceAtLeast(0)
+                val paddedBitmap = Bitmap.createBitmap(
+                    imgWidth + rowPadding / pixelStride.coerceAtLeast(1),
+                    imgHeight,
+                    Bitmap.Config.ARGB_8888
+                )
+                plane.buffer.rewind()
+                paddedBitmap.copyPixelsFromBuffer(plane.buffer)
+                val cleanBitmap = if (rowPadding > 0) {
+                    Bitmap.createBitmap(paddedBitmap, 0, 0, imgWidth, imgHeight).also {
+                        paddedBitmap.recycle()
+                    }
+                } else {
+                    paddedBitmap
+                }
+                val base64 = if (includeVisionBase64) encodeVisionThumbnailBase64(cleanBitmap) else null
+                VolatileScreenFrame(
+                    bitmap = cleanBitmap,
+                    width = imgWidth,
+                    height = imgHeight,
+                    visionJpegBase64 = base64,
+                    timestampMillis = System.currentTimeMillis()
+                )
+            } catch (_: Throwable) {
+                null
+            } finally {
+                runCatching { acquiredImage?.close() }
             }
         }
 

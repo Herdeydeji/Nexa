@@ -10,6 +10,7 @@ import com.example.android.app.AndroidAppDiscovery
 import com.example.android.app.AndroidAppLauncher
 import com.example.android.media.MediaProjectionSessionManager
 import com.example.android.notifications.NexaTaskNotificationManager
+import com.example.android.ocr.MlKitScreenOcrProcessor
 import com.example.android.overlay.FloatingIndicatorController
 import com.example.android.runtime.AndroidActionRuntime
 import com.example.android.runtime.AndroidActionVerifier
@@ -79,8 +80,15 @@ class AppContainer(application: Application) {
     )
     val appDiscovery: AndroidAppDiscovery = AndroidAppDiscovery(application)
     val nodeInspector: AccessibilityNodeInspector = AccessibilityNodeInspector()
+    val ocrProcessor: MlKitScreenOcrProcessor = MlKitScreenOcrProcessor()
     val screenObserver: AndroidScreenObserver = AndroidScreenObserver(
-        bridge = LiveAccessibilityScreenBridge(permissionManager, nodeInspector)
+        bridge = LiveAccessibilityScreenBridge(
+            permissionManager = permissionManager,
+            nodeInspector = nodeInspector,
+            context = application
+        ),
+        screenshotBackend = mediaProjectionSessionManager,
+        ocrProcessor = ocrProcessor
     )
     val actionVerifier: AndroidActionVerifier = AndroidActionVerifier(screenObserver)
     val appLauncher: AndroidAppLauncher = AndroidAppLauncher(
@@ -154,8 +162,23 @@ class AppContainer(application: Application) {
         toolRegistry = toolRegistry,
         safetyPolicyManager = safetyPolicyManager,
         executionRuntime = toolExecutionRuntime,
-        contextBuilder = contextBuilder
+        contextBuilder = contextBuilder,
+        onTaskFinished = { pruneTransientScreenshots(application) }
     )
+
+    private fun pruneTransientScreenshots(app: Application) {
+        runCatching {
+            val dir = java.io.File(app.cacheDir, "screenshots")
+            if (!dir.exists() || !dir.isDirectory) return@runCatching
+            val files = dir.listFiles()?.sortedByDescending { it.lastModified() } ?: return@runCatching
+            val cutoff = System.currentTimeMillis() - 10 * 60_000L
+            files.forEachIndexed { idx, file ->
+                if (idx >= 3 || file.lastModified() < cutoff) {
+                    file.delete()
+                }
+            }
+        }
+    }
 
     suspend fun ensureSeeded() {
         database.initializePhase2DataIfNeeded(converters)

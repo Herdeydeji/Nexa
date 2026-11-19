@@ -340,10 +340,15 @@ class NexaToolSyncRepairTest {
             "play_on_youtube",
             "observe_screen",
             "wait_for_screen_change",
+            "wait_for_element",
             "tap_element",
+            "double_tap_element",
             "long_press_element",
             "tap_coordinates",
+            "swipe_screen",
+            "drag_and_drop",
             "type_text",
+            "edit_text_field",
             "scroll_screen",
             "press_back",
             "press_home",
@@ -401,7 +406,7 @@ class NexaToolSyncRepairTest {
         val tapEntry2 = registry.getAllRegisteredTools(caps2).first { it.definition.name == "tap_element" }
         assertEquals(ToolAvailabilityStatus.TEMPORARILY_UNAVAILABLE, tapEntry2.availabilityStatus)
 
-        // 3. Accessibility connected & MediaProjection active -> all 19 tools AVAILABLE
+        // 3. Accessibility connected & MediaProjection active -> all 24 tools AVAILABLE
         perm.accState = AccessibilityRuntimeState.SERVICE_ENABLED
         perm.projState = MediaProjectionConsentState.GRANTED_ACTIVE
         screenshotBackend.setSnapshot(
@@ -413,7 +418,7 @@ class NexaToolSyncRepairTest {
             )
         )
         val caps3 = inspector.inspectAll(emptyMap())
-        assertEquals(19, registry.getAvailableTools(caps3).size)
+        assertEquals(24, registry.getAvailableTools(caps3).size)
 
         // 4. Runtime execution gate blocks unconsented tool calls deterministically
         perm.accState = AccessibilityRuntimeState.SERVICE_DISABLED

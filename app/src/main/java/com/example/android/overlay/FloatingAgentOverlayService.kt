@@ -121,14 +121,16 @@ class FloatingAgentOverlayService : Service() {
 
         ensureOverlayAttached()
 
-        // Auto-expand if waiting on manual user action so Continue / candidates are one tap away.
-        if (state.showManualContinue || state.ambiguityCandidates.isNotEmpty()) {
+        // Confirmed auto-expand policy: expand automatically on waits, recovery, manual continue, or disambiguation.
+        if (state.autoExpandOnState || state.showManualContinue || state.ambiguityCandidates.isNotEmpty()) {
             isExpanded = true
         }
 
         val accentColor = when (state.visualState) {
             FloatingIndicatorVisualState.EXECUTING,
             FloatingIndicatorVisualState.THINKING -> Color.parseColor("#F36B21")
+            FloatingIndicatorVisualState.VERIFYING -> Color.parseColor("#38BDF8")
+            FloatingIndicatorVisualState.RECOVERING -> Color.parseColor("#F97316")
             FloatingIndicatorVisualState.WAITING_FOR_USER,
             FloatingIndicatorVisualState.BLOCKED -> Color.parseColor("#F59E0B")
             FloatingIndicatorVisualState.PAUSED -> Color.parseColor("#60A5FA")
@@ -138,16 +140,21 @@ class FloatingAgentOverlayService : Service() {
         }
 
         (dotView.background as? GradientDrawable)?.setColor(accentColor)
-        pillTitle.text = "Nexa · ${state.visualState.label}"
+        val compactPhase = state.executionPhase.label.takeIf { state.executionPhase != com.example.domain.model.AgentExecutionPhase.IDLE }
+            ?: state.visualState.label
+        pillTitle.text = "Nexa · $compactPhase"
         val stepText = if (state.totalSteps > 0) "${state.completedSteps}/${state.totalSteps}" else "Active"
         pillStepBadge.text = stepText
 
-        cardStatusText.text = state.visualState.label.uppercase()
+        val verSuffix = state.verificationLevel?.let { " · L${it.levelNumber}" }.orEmpty()
+        cardStatusText.text = "${compactPhase.uppercase()}$verSuffix"
         cardStatusText.setTextColor(accentColor)
-        cardObjectiveText.text = state.objective.ifBlank { "Nexa Task" }
+        cardObjectiveText.text = state.currentSubgoal.ifBlank { state.objective.ifBlank { "Nexa Task" } }
 
         val fgSuffix = state.foregroundApp?.let { " · $it" } ?: ""
-        cardActionText.text = "${state.currentAction}$fgSuffix"
+        val verifiedLine = state.lastVerifiedAction?.let { "\nVerified: $it" }.orEmpty()
+        val nextLine = state.nextPlannedAction?.let { "\nNext: $it" }.orEmpty()
+        cardActionText.text = "${state.currentAction}$fgSuffix$verifiedLine$nextLine"
 
         if (!state.blockerTitle.isNullOrBlank() || !state.blockerMessage.isNullOrBlank()) {
             cardBlockerText.visibility = View.VISIBLE
@@ -166,8 +173,9 @@ class FloatingAgentOverlayService : Service() {
         if (selId != null && state.ambiguityCandidates.isNotEmpty()) {
             ambiguityContainer.visibility = View.VISIBLE
             state.ambiguityCandidates.take(4).forEach { candidate ->
+                val detailSuffix = candidate.subtitle ?: candidate.packageName.substringAfterLast('.')
                 val btn = createActionButton(
-                    text = "${candidate.displayName} (${candidate.packageName.substringAfterLast('.')})",
+                    text = "${candidate.displayName} ($detailSuffix)",
                     bgColor = Color.parseColor("#20232A"),
                     textColor = Color.WHITE
                 ) {

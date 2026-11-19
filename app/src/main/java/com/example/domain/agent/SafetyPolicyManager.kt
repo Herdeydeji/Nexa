@@ -104,10 +104,10 @@ class DefaultSafetyPolicyManager : SafetyPolicyManager {
         val shouldRedactArgs = settings.redactSensitiveStepsInLogs && (
             effectiveCategory == ToolRiskCategory.SENSITIVE ||
                 effectiveCategory == ToolRiskCategory.EXTERNAL_SIDE_EFFECT ||
-                def.name == "type_text"
+                def.name in setOf("type_text", "edit_text_field")
             )
         val rawSummary = tool.describeAction(args)
-        val actionSummary = if (shouldRedactArgs && def.name == "type_text") {
+        val actionSummary = if (shouldRedactArgs && def.name in setOf("type_text", "edit_text_field")) {
             "Type protected text input (details redacted by privacy policy)"
         } else {
             rawSummary
@@ -162,7 +162,7 @@ class DefaultSafetyPolicyManager : SafetyPolicyManager {
     }
 
     private fun detectSensitiveUiTarget(toolName: String, args: JSONObject): String? {
-        if (toolName !in setOf("tap_element", "long_press_element", "type_text", "press_enter")) {
+        if (toolName !in setOf("tap_element", "double_tap_element", "long_press_element", "type_text", "edit_text_field", "press_enter")) {
             return null
         }
         val fields = listOf(
@@ -192,7 +192,7 @@ class DefaultSafetyPolicyManager : SafetyPolicyManager {
                 return app
             }
         }
-        if (toolName in setOf("tap_element", "long_press_element", "type_text")) {
+        if (toolName in setOf("tap_element", "double_tap_element", "long_press_element", "type_text", "edit_text_field")) {
             val fields = listOf(
                 args.optString("text"),
                 args.optString("content_description"),

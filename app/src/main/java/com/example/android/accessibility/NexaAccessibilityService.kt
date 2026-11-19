@@ -13,7 +13,9 @@ import android.os.Handler
 import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -134,10 +136,27 @@ class NexaAccessibilityService : AccessibilityService() {
         performGlobalAction(GLOBAL_ACTION_HOME)
     }.getOrDefault(false)
 
+    fun isSoftKeyboardVisible(): Boolean {
+        return runCatching {
+            windows?.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD } == true
+        }.getOrDefault(false)
+    }
+
     suspend fun dispatchTap(x: Float, y: Float, timeoutMillis: Long = 1_500L): Boolean {
         val path = Path().apply { moveTo(x, y) }
         val stroke = GestureDescription.StrokeDescription(path, 0L, 60L)
         return dispatchSingleGesture(GestureDescription.Builder().addStroke(stroke).build(), timeoutMillis)
+    }
+
+    suspend fun dispatchDoubleTap(x: Float, y: Float, timeoutMillis: Long = 2_000L): Boolean {
+        val path1 = Path().apply { moveTo(x, y) }
+        val stroke1 = GestureDescription.StrokeDescription(path1, 0L, 50L)
+        val firstOk = dispatchSingleGesture(GestureDescription.Builder().addStroke(stroke1).build(), timeoutMillis)
+        if (!firstOk) return false
+        delay(95L)
+        val path2 = Path().apply { moveTo(x, y) }
+        val stroke2 = GestureDescription.StrokeDescription(path2, 0L, 50L)
+        return dispatchSingleGesture(GestureDescription.Builder().addStroke(stroke2).build(), timeoutMillis)
     }
 
     suspend fun dispatchLongPress(x: Float, y: Float, durationMs: Long = 650L, timeoutMillis: Long = 2_000L): Boolean {
@@ -158,7 +177,25 @@ class NexaAccessibilityService : AccessibilityService() {
             moveTo(startX, startY)
             lineTo(endX, endY)
         }
-        val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs.coerceIn(150L, 1_000L))
+        val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs.coerceIn(150L, 1_200L))
+        return dispatchSingleGesture(GestureDescription.Builder().addStroke(stroke).build(), timeoutMillis)
+    }
+
+    suspend fun dispatchDragAndDrop(
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+        durationMs: Long = 750L,
+        timeoutMillis: Long = 3_000L
+    ): Boolean {
+        val holdX = startX + 0.5f
+        val path = Path().apply {
+            moveTo(startX, startY)
+            lineTo(holdX, startY)
+            lineTo(endX, endY)
+        }
+        val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs.coerceIn(450L, 1_800L))
         return dispatchSingleGesture(GestureDescription.Builder().addStroke(stroke).build(), timeoutMillis)
     }
 

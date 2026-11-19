@@ -5,6 +5,7 @@ import com.example.data.repository.ConnectionsRepository
 import com.example.domain.chat.ConversationContextBuilder
 import com.example.domain.model.AgentEvent
 import com.example.domain.model.AgentExecutionContext
+import com.example.domain.model.AgentExecutionPhase
 import com.example.domain.model.AgentRunStatus
 import com.example.domain.model.AgentTaskStatus
 import com.example.domain.model.AmbiguityCandidateItem
@@ -12,6 +13,7 @@ import com.example.domain.model.AmbiguitySelectionRequest
 import com.example.domain.model.ApprovalDecision
 import com.example.domain.model.AttachmentPayload
 import com.example.domain.model.ChatMessage
+import com.example.domain.model.ComputerUseFailureCategory
 import com.example.domain.model.ExecutionPlan
 import com.example.domain.model.ExecutionStep
 import com.example.domain.model.ExecutionStepState
@@ -27,6 +29,7 @@ import com.example.domain.model.ToolCallResult
 import com.example.domain.model.ToolDispatchDiagnostic
 import com.example.domain.model.ToolExecutionStatus
 import com.example.domain.model.UserUnlockWaitRequest
+import com.example.domain.model.VerificationLevel
 import com.example.domain.provider.ProviderRequest
 import com.example.domain.provider.ProviderStreamEvent
 import kotlinx.coroutines.CancellationException
@@ -78,7 +81,8 @@ class DefaultAutonomousAgentOrchestrator(
     private val foregroundPackageProvider: () -> String? = {
         NexaAccessibilityService.runtimeState.value.activePackageName
     },
-    private val appLockPollIntervalMillis: Long = 1_000L
+    private val appLockPollIntervalMillis: Long = 1_000L,
+    private val onTaskFinished: (() -> Unit)? = null
 ) : AutonomousAgentOrchestrator {
 
     constructor(
@@ -91,7 +95,8 @@ class DefaultAutonomousAgentOrchestrator(
         foregroundPackageProvider: () -> String? = {
             NexaAccessibilityService.runtimeState.value.activePackageName
         },
-        appLockPollIntervalMillis: Long = 1_000L
+        appLockPollIntervalMillis: Long = 1_000L,
+        onTaskFinished: (() -> Unit)? = null
     ) : this(
         streamCaller = ProviderStreamCaller { provider, request ->
             connectionsRepository.streamChat(provider, request)
@@ -102,7 +107,8 @@ class DefaultAutonomousAgentOrchestrator(
         contextBuilder = contextBuilder,
         diagnosticSink = diagnosticSink,
         foregroundPackageProvider = foregroundPackageProvider,
-        appLockPollIntervalMillis = appLockPollIntervalMillis
+        appLockPollIntervalMillis = appLockPollIntervalMillis,
+        onTaskFinished = onTaskFinished
     )
 
     override fun runTurn(
@@ -117,65 +123,77 @@ class DefaultAutonomousAgentOrchestrator(
             workingHistory = historySnapshot.toMutableList()
         )
 
-        send(AgentEvent.StatusChanged(context.taskId, AgentRunStatus.PREPARING, "Preparing execution context..."))
+        send(
+            AgentEvent.StatusChanged(
+                taskId = context.taskId,
+                status = AgentRunStatus.PREPARING,
+                message = "Preparing execution context...",
+                phase = AgentExecutionPhase.UNDERSTANDING_REQUEST,
+                currentSubgoal = state.goal.take(80)
+            )
+        )
 
         val timedOut = AtomicBoolean(false)
         var finishedNormally = false
-        coroutineScope {
-            val worker = launch {
-                executeLoop(this@channelFlow, context, attachments, control, state)
-                finishedNormally = true
-            }
-            val watchdog = launch(timeoutDispatcher) {
-                var activeElapsedMs = 0L
-                var lastTickMs = System.currentTimeMillis()
-                while (!finishedNormally) {
-                    delay(100L)
-                    val now = System.currentTimeMillis()
-                    val delta = (now - lastTickMs).coerceIn(0L, 1_000L)
-                    lastTickMs = now
-                    // Pause active-execution clock whenever user is paused, approving, unlocking AppLock, or choosing ambiguity.
-                    if (!control.isPausedNow() && !state.isWaitingOnUser) {
-                        activeElapsedMs += delta
-                        if (activeElapsedMs >= context.limits.taskTimeoutMillis) {
-                            timedOut.set(true)
-                            worker.cancel(
-                                CancellationException("Task timed out after ${context.limits.taskTimeoutMillis}ms of active execution")
-                            )
-                            break
+        try {
+            coroutineScope {
+                val worker = launch {
+                    executeLoop(this@channelFlow, context, attachments, control, state)
+                    finishedNormally = true
+                }
+                val watchdog = launch(timeoutDispatcher) {
+                    var activeElapsedMs = 0L
+                    var lastTickMs = System.currentTimeMillis()
+                    while (!finishedNormally) {
+                        delay(100L)
+                        val now = System.currentTimeMillis()
+                        val delta = (now - lastTickMs).coerceIn(0L, 1_000L)
+                        lastTickMs = now
+                        // Pause active-execution clock whenever user is paused, approving, unlocking AppLock, or choosing ambiguity.
+                        if (!control.isPausedNow() && !state.isWaitingOnUser) {
+                            activeElapsedMs += delta
+                            if (activeElapsedMs >= context.limits.taskTimeoutMillis) {
+                                timedOut.set(true)
+                                worker.cancel(
+                                    CancellationException("Task timed out after ${context.limits.taskTimeoutMillis}ms of active execution")
+                                )
+                                break
+                            }
                         }
                     }
                 }
+                worker.join()
+                watchdog.cancel()
             }
-            worker.join()
-            watchdog.cancel()
-        }
 
-        if (timedOut.get()) {
-            currentCoroutineContext().ensureActive()
-            val timeoutMsg = "Task timed out after ${context.limits.taskTimeoutMillis / 1000L}s of active execution before completion."
-            state.steps.add(
-                ExecutionStep(
-                    id = "step_timeout_${state.steps.size + 1}",
-                    title = "Task timeout reached",
-                    detail = timeoutMsg,
-                    state = ExecutionStepState.FAILED,
-                    kind = StepKind.ERROR
+            if (timedOut.get()) {
+                currentCoroutineContext().ensureActive()
+                val timeoutMsg = "Task timed out after ${context.limits.taskTimeoutMillis / 1000L}s of active execution before completion."
+                state.steps.add(
+                    ExecutionStep(
+                        id = "step_timeout_${state.steps.size + 1}",
+                        title = "Task timeout reached",
+                        detail = timeoutMsg,
+                        state = ExecutionStepState.FAILED,
+                        kind = StepKind.ERROR
+                    )
                 )
-            )
-            val verification = buildVerificationSummary(state, forceUnverified = true)
-            val plan = buildPlanIfAny(state, verification)
-            send(
-                AgentEvent.Failed(
-                    taskId = context.taskId,
-                    partialText = state.latestStreamingText,
-                    errorMessage = timeoutMsg,
-                    plan = plan,
-                    verification = verification,
-                    usage = state.totalUsage,
-                    taskSummary = buildTaskSummary(state, AgentTaskStatus.FAILED)
+                val verification = buildVerificationSummary(state, forceUnverified = true)
+                val plan = buildPlanIfAny(state, verification)
+                send(
+                    AgentEvent.Failed(
+                        taskId = context.taskId,
+                        partialText = state.latestStreamingText,
+                        errorMessage = timeoutMsg,
+                        plan = plan,
+                        verification = verification,
+                        usage = state.totalUsage,
+                        taskSummary = buildTaskSummary(state, AgentTaskStatus.FAILED)
+                    )
                 )
-            )
+            }
+        } finally {
+            runCatching { onTaskFinished?.invoke() }
         }
     }
 
@@ -239,12 +257,21 @@ class DefaultAutonomousAgentOrchestrator(
             }
 
             val thinkingStatus = if (iteration == 1) AgentRunStatus.THINKING else AgentRunStatus.REPLANNING
+            val thinkingPhase = if (iteration == 1) AgentExecutionPhase.PLANNING else AgentExecutionPhase.REPLANNING
             val thinkingMessage = if (iteration == 1) {
                 "Thinking with ${modelId.substringAfterLast("/")}..."
             } else {
-                "Observing tool results (step $iteration)..."
+                "Observing tool results & replanning (step $iteration)..."
             }
-            collector.send(AgentEvent.StatusChanged(context.taskId, thinkingStatus, thinkingMessage))
+            collector.send(
+                AgentEvent.StatusChanged(
+                    taskId = context.taskId,
+                    status = thinkingStatus,
+                    message = thinkingMessage,
+                    phase = thinkingPhase,
+                    currentSubgoal = state.goal.take(80)
+                )
+            )
 
             state.latestStreamingText = ""
             if (iteration > 1) {
@@ -354,7 +381,14 @@ class DefaultAutonomousAgentOrchestrator(
                     return
                 }
 
-                collector.send(AgentEvent.StatusChanged(context.taskId, AgentRunStatus.VERIFYING, "Verifying completion..."))
+                collector.send(
+                    AgentEvent.StatusChanged(
+                        taskId = context.taskId,
+                        status = AgentRunStatus.VERIFYING,
+                        message = "Verifying completion...",
+                        phase = AgentExecutionPhase.VERIFYING
+                    )
+                )
                 if (state.requestedToolCalls > 0) {
                     val interimVerification = buildVerificationSummary(state)
                     state.steps.add(
@@ -542,9 +576,11 @@ class DefaultAutonomousAgentOrchestrator(
                             emitPlanSnapshot(collector, state)
                             collector.send(
                                 AgentEvent.StatusChanged(
-                                    context.taskId,
-                                    AgentRunStatus.AWAITING_APPROVAL,
-                                    "Approval needed for ${call.toolName}"
+                                    taskId = context.taskId,
+                                    status = AgentRunStatus.AWAITING_APPROVAL,
+                                    message = "Approval needed for ${call.toolName}",
+                                    phase = AgentExecutionPhase.WAITING_FOR_USER,
+                                    nextPlannedAction = call.toolName
                                 )
                             )
                             collector.send(AgentEvent.ApprovalRequired(context.taskId, policy.request))
@@ -573,9 +609,11 @@ class DefaultAutonomousAgentOrchestrator(
                                 collector.send(AgentEvent.ToolStarted(context.taskId, call))
                                 collector.send(
                                     AgentEvent.StatusChanged(
-                                        context.taskId,
-                                        AgentRunStatus.EXECUTING_TOOL,
-                                        "Executing ${call.toolName}..."
+                                        taskId = context.taskId,
+                                        status = statusForTool(call.toolName),
+                                        message = "Executing ${call.toolName}...",
+                                        phase = phaseForTool(call.toolName),
+                                        nextPlannedAction = call.toolName
                                     )
                                 )
                                 executionRuntime.executeToolCall(
@@ -592,9 +630,11 @@ class DefaultAutonomousAgentOrchestrator(
                             collector.send(AgentEvent.ToolStarted(context.taskId, call))
                             collector.send(
                                 AgentEvent.StatusChanged(
-                                    context.taskId,
-                                    AgentRunStatus.EXECUTING_TOOL,
-                                    "Executing ${call.toolName}..."
+                                    taskId = context.taskId,
+                                    status = statusForTool(call.toolName),
+                                    message = "Executing ${call.toolName}...",
+                                    phase = phaseForTool(call.toolName),
+                                    nextPlannedAction = call.toolName
                                 )
                             )
                             executionRuntime.executeToolCall(
@@ -633,10 +673,22 @@ class DefaultAutonomousAgentOrchestrator(
                 state.allResults.add(result)
                 turnResults.add(result)
                 collector.send(AgentEvent.ToolCompleted(context.taskId, result))
+                emitSubgoalProgress(collector, context.taskId, state.goal, call, result)
                 emitPlanSnapshot(collector, state)
 
                 // Track meaningful progress and stop repeated no-progress loops cleanly.
                 when (val progress = progressMonitor.recordToolResult(call, result)) {
+                    is ProgressCheckOutcome.NoProgressCycle -> {
+                        collector.send(
+                            AgentEvent.StatusChanged(
+                                taskId = context.taskId,
+                                status = AgentRunStatus.RECOVERING,
+                                message = "Screen unchanged — adapting strategy...",
+                                phase = AgentExecutionPhase.RECOVERING,
+                                currentSubgoal = state.goal.take(80)
+                            )
+                        )
+                    }
                     is ProgressCheckOutcome.HaltNoProgress -> {
                         val haltMsg = "Task paused safely to avoid an infinite loop (${progress.blockerClassification}): ${progress.reason}"
                         state.steps.add(
@@ -670,6 +722,9 @@ class DefaultAutonomousAgentOrchestrator(
                 }
             }
 
+            // Condense verbose node lists from older tool messages so LLM stays focused on the latest screen.
+            condenseOlderScreenPayloads(state.workingHistory)
+
             turnResults.forEach { res ->
                 val content = res.outputJson ?: JSONObject().put("error", res.errorMessage ?: res.displaySummary).toString()
                 val visual = executionRuntime.consumeVisualAttachment(res.callId)
@@ -700,9 +755,10 @@ class DefaultAutonomousAgentOrchestrator(
             )
             collector.send(
                 AgentEvent.StatusChanged(
-                    context.taskId,
-                    AgentRunStatus.OBSERVING_RESULT,
-                    "Observed ${turnResults.size} tool result(s)"
+                    taskId = context.taskId,
+                    status = AgentRunStatus.OBSERVING_RESULT,
+                    message = "Observed ${turnResults.size} tool result(s)",
+                    phase = AgentExecutionPhase.OBSERVING
                 )
             )
         }
@@ -744,64 +800,137 @@ class DefaultAutonomousAgentOrchestrator(
         val parsed = runCatching { result.outputJson?.let { JSONObject(it) } }.getOrNull() ?: return result
         val status = parsed.optString("status")
         val errorCode = parsed.optString("errorCode")
-        if (status != "AMBIGUOUS" && errorCode != "APP_AMBIGUOUS") return result
+        val isUiAmbiguity = status == "UI_AMBIGUOUS" || errorCode == "UI_AMBIGUOUS" || errorCode == "AMBIGUOUS_TARGET"
+        val isAppAmbiguity = status == "AMBIGUOUS" || errorCode == "APP_AMBIGUOUS"
+        if (!isUiAmbiguity && !isAppAmbiguity) return result
 
         val candidatesArr: JSONArray = parsed.optJSONArray("candidates") ?: return result
         val candidates = buildList {
             for (i in 0 until candidatesArr.length()) {
                 val obj = candidatesArr.optJSONObject(i) ?: continue
-                val pkg = obj.optString("package_name").ifBlank { obj.optString("packageName") }
-                val name = obj.optString("display_name").ifBlank { obj.optString("appName").ifBlank { pkg } }
-                if (pkg.isNotBlank()) {
-                    add(
-                        AmbiguityCandidateItem(
-                            displayName = name,
-                            packageName = pkg,
-                            isLaunchable = obj.optBoolean("launchable", true)
+                if (isUiAmbiguity) {
+                    val nodeIndex = obj.optInt("node_index", -1)
+                    if (nodeIndex >= 0) {
+                        val label = obj.optString("label").ifBlank { "Element #$nodeIndex" }
+                        val role = obj.optString("role").ifBlank { "element" }
+                        val bounds = obj.optString("bounds").ifBlank { "" }
+                        add(
+                            AmbiguityCandidateItem(
+                                displayName = label,
+                                packageName = "node:$nodeIndex",
+                                isLaunchable = false,
+                                subtitle = listOfNotNull(role.takeIf { it.isNotBlank() }, bounds.takeIf { it.isNotBlank() }).joinToString(" · "),
+                                nodeIndex = nodeIndex
+                            )
                         )
-                    )
+                    }
+                } else {
+                    val pkg = obj.optString("package_name").ifBlank { obj.optString("packageName") }
+                    val name = obj.optString("display_name").ifBlank { obj.optString("appName").ifBlank { pkg } }
+                    if (pkg.isNotBlank()) {
+                        add(
+                            AmbiguityCandidateItem(
+                                displayName = name,
+                                packageName = pkg,
+                                isLaunchable = obj.optBoolean("launchable", true)
+                            )
+                        )
+                    }
                 }
             }
         }
         if (candidates.isEmpty()) return result
 
-        val query = parsed.optString("query").ifBlank { "application" }
+        val origArgs = executionRuntime.parseArgsObject(call.argumentsJson)
+        val query = parsed.optString("query").ifBlank {
+            if (isUiAmbiguity) {
+                origArgs?.optString("text")?.ifBlank { null }
+                    ?: origArgs?.optString("content_description")?.ifBlank { null }
+                    ?: "UI control"
+            } else {
+                "application"
+            }
+        }
         val reason = parsed.optString("reason").ifBlank {
-            "Multiple installed apps matched '$query'. Choose one to continue."
+            if (isUiAmbiguity) {
+                "Multiple UI controls matched '$query'. Choose which element to interact with."
+            } else {
+                "Multiple installed apps matched '$query'. Choose one to continue."
+            }
         }
         val request = AmbiguitySelectionRequest(
             selectionId = "amb_${UUID.randomUUID()}",
             taskId = context.taskId,
             query = query,
             reason = reason,
-            candidates = candidates
+            candidates = candidates,
+            isUiElementSelection = isUiAmbiguity
         )
 
         updateStep(state, stepIdx, ExecutionStepState.AWAITING_CONFIRMATION, reason, StepKind.APPROVAL)
         emitPlanSnapshot(collector, state)
-        collector.send(AgentEvent.StatusChanged(context.taskId, AgentRunStatus.WAITING_FOR_AMBIGUITY_CHOICE, reason))
+        collector.send(
+            AgentEvent.StatusChanged(
+                taskId = context.taskId,
+                status = AgentRunStatus.WAITING_FOR_AMBIGUITY_CHOICE,
+                message = reason,
+                phase = AgentExecutionPhase.WAITING_FOR_USER
+            )
+        )
         collector.send(AgentEvent.AmbiguityChoiceRequired(context.taskId, request))
 
-        val selectedPkg = try {
+        val selectedKey = try {
             state.isWaitingOnUser = true
             control.requestAmbiguityChoice(request)
         } finally {
             state.isWaitingOnUser = false
         }
 
-        if (selectedPkg.isNullOrBlank()) {
+        if (selectedKey.isNullOrBlank()) {
             return result
         }
 
         collector.send(AgentEvent.Resumed(context.taskId))
+        if (isUiAmbiguity) {
+            val chosenCandidate = candidates.firstOrNull { it.packageName == selectedKey || it.nodeIndex?.toString() == selectedKey }
+            val chosenIndex = chosenCandidate?.nodeIndex
+                ?: selectedKey.removePrefix("node:").toIntOrNull()
+                ?: return result
+            val snapshotId = parsed.optJSONObject("screen")?.optLong("snapshotId", -1L)?.takeIf { it > 0L }
+            val nextArgs = JSONObject(origArgs?.toString() ?: "{}").apply {
+                put("node_index", chosenIndex)
+                if (snapshotId != null) put("snapshot_id", snapshotId)
+                remove("view_id")
+                remove("content_description")
+                remove("hint_or_label")
+                remove("anchor_context")
+                remove("region")
+                if (call.toolName !in setOf("type_text", "edit_text_field")) {
+                    remove("text")
+                }
+            }
+            updateStep(state, stepIdx, ExecutionStepState.RUNNING, "Running ${call.toolName} on chosen element #$chosenIndex...", StepKind.EXECUTED)
+            emitPlanSnapshot(collector, state)
+            return executionRuntime.executeToolCall(
+                call = ToolCall(
+                    id = call.id,
+                    toolName = call.toolName,
+                    argumentsJson = nextArgs.toString()
+                ),
+                settings = context.settings,
+                timeoutMillis = context.limits.toolTimeoutMillis,
+                maxResultChars = context.limits.maxToolResultChars
+            )
+        }
+
         return if (call.toolName == "launch_app") {
-            updateStep(state, stepIdx, ExecutionStepState.RUNNING, "Launching selected app ($selectedPkg)...", StepKind.EXECUTED)
+            updateStep(state, stepIdx, ExecutionStepState.RUNNING, "Launching selected app ($selectedKey)...", StepKind.EXECUTED)
             emitPlanSnapshot(collector, state)
             executionRuntime.executeToolCall(
                 call = ToolCall(
                     id = call.id,
                     toolName = "launch_app",
-                    argumentsJson = JSONObject().put("app_name", selectedPkg).toString()
+                    argumentsJson = JSONObject().put("app_name", selectedKey).toString()
                 ),
                 settings = context.settings,
                 timeoutMillis = context.limits.toolTimeoutMillis,
@@ -810,13 +939,13 @@ class DefaultAutonomousAgentOrchestrator(
         } else {
             val enriched = JSONObject(parsed.toString())
                 .put("status", "FOUND")
-                .put("selected_package", selectedPkg)
-                .put("package_name", selectedPkg)
-                .put("display_name", candidates.firstOrNull { it.packageName == selectedPkg }?.displayName ?: selectedPkg)
+                .put("selected_package", selectedKey)
+                .put("package_name", selectedKey)
+                .put("display_name", candidates.firstOrNull { it.packageName == selectedKey }?.displayName ?: selectedKey)
             result.copy(
                 status = ToolExecutionStatus.SUCCEEDED,
                 outputJson = enriched.toString(),
-                displaySummary = "User selected $selectedPkg",
+                displaySummary = "User selected $selectedKey",
                 errorMessage = null
             )
         }
@@ -878,7 +1007,14 @@ class DefaultAutonomousAgentOrchestrator(
             remainingSeconds = timeoutSeconds,
             manualContinueRequired = false
         )
-        collector.send(AgentEvent.StatusChanged(context.taskId, AgentRunStatus.WAITING_FOR_USER_UNLOCK, message))
+        collector.send(
+            AgentEvent.StatusChanged(
+                taskId = context.taskId,
+                status = AgentRunStatus.WAITING_FOR_USER_UNLOCK,
+                message = message,
+                phase = AgentExecutionPhase.WAITING_FOR_USER
+            )
+        )
         collector.send(AgentEvent.WaitingForUserUnlock(context.taskId, waitRequest))
 
         val pollInterval = appLockPollIntervalMillis.coerceIn(25L, 1_000L)
@@ -1035,7 +1171,7 @@ class DefaultAutonomousAgentOrchestrator(
         val shouldRedact = context.settings.redactSensitiveStepsInLogs && (
             risk == com.example.domain.model.ToolRiskCategory.SENSITIVE ||
                 risk == com.example.domain.model.ToolRiskCategory.EXTERNAL_SIDE_EFFECT ||
-                call.toolName == "type_text"
+                call.toolName in setOf("type_text", "edit_text_field")
             )
         if (shouldRedact) {
             return "Arguments redacted by privacy policy"
@@ -1087,11 +1223,20 @@ class DefaultAutonomousAgentOrchestrator(
         var verifiedCompleted = 0
         var unverifiedCompleted = 0
         var blockedCount = 0
+        var observedMaxLevel = 0
 
         results.forEach { res ->
             val obj = runCatching { res.outputJson?.let { JSONObject(it) } }.getOrNull()
             val statusTag = obj?.optString("status").orEmpty()
             val errorCode = obj?.optString("errorCode").orEmpty()
+            val levelNum = if (obj != null && obj.has("verificationLevel")) {
+                obj.optInt("verificationLevel", -1)
+            } else {
+                -1
+            }
+            if (levelNum > observedMaxLevel) {
+                observedMaxLevel = levelNum
+            }
             val isBlocked = statusTag in setOf("BLOCKED_BY_APPLOCK", "BLOCKED_BY_DIALOG", "APP_LOADING") ||
                 errorCode in setOf("BLOCKED_BY_APPLOCK", "BLOCKED_BY_DIALOG", "APP_LOADING")
             if (isBlocked) {
@@ -1102,6 +1247,7 @@ class DefaultAutonomousAgentOrchestrator(
                     res.toolName == "launch_app" && statusTag == "LAUNCH_DISPATCHED" -> true
                     res.toolName == "open_url" && statusTag == "LAUNCH_DISPATCHED" -> true
                     res.toolName == "play_on_youtube" && statusTag in setOf("SEARCH_OPENED", "PLAYBACK_UNVERIFIED") -> true
+                    levelNum == 0 -> true
                     obj?.has("foreground_verified") == true &&
                         !obj.optBoolean("foreground_verified", false) &&
                         res.toolName in setOf("launch_app", "open_url") -> true
@@ -1154,6 +1300,13 @@ class DefaultAutonomousAgentOrchestrator(
                 unverifiedCompleted == 0
         }
 
+        val computedMaxLevel = when {
+            observedMaxLevel > 0 -> observedMaxLevel
+            verified && objectiveVerified -> 4
+            verifiedCompleted > 0 -> 2
+            else -> 0
+        }
+
         val note = when {
             state.requestedToolCalls == 0 -> "Conversational response (no tool calls)."
             verified && objectiveVerified ->
@@ -1185,8 +1338,79 @@ class DefaultAutonomousAgentOrchestrator(
             unverifiedCompletedCount = unverifiedCompleted,
             blockedCount = blockedCount,
             remainingCount = remainingSteps,
-            objectiveVerified = objectiveVerified
+            objectiveVerified = objectiveVerified,
+            maxVerificationLevel = computedMaxLevel
         )
+    }
+
+    private fun statusForTool(toolName: String): AgentRunStatus = when (toolName) {
+        "observe_screen", "take_screenshot" -> AgentRunStatus.OBSERVING_RESULT
+        "tap_element", "double_tap_element", "long_press_element", "type_text", "edit_text_field" ->
+            AgentRunStatus.LOCATING_TARGET
+        else -> AgentRunStatus.EXECUTING_TOOL
+    }
+
+    private fun phaseForTool(toolName: String): AgentExecutionPhase = when (toolName) {
+        "observe_screen", "take_screenshot" -> AgentExecutionPhase.OBSERVING
+        "wait_for_screen_change", "wait_for_element" -> AgentExecutionPhase.WAITING_FOR_TRANSITION
+        "tap_element", "double_tap_element", "long_press_element", "type_text", "edit_text_field" ->
+            AgentExecutionPhase.LOCATING_TARGET
+        else -> AgentExecutionPhase.EXECUTING_ACTION
+    }
+
+    private suspend fun emitSubgoalProgress(
+        collector: ProducerScope<AgentEvent>,
+        taskId: String,
+        goal: String,
+        call: ToolCall,
+        result: ToolCallResult
+    ) {
+        val parsed = runCatching { result.outputJson?.let { JSONObject(it) } }.getOrNull()
+        val vLevel = if (parsed != null && parsed.has("verificationLevel")) {
+            VerificationLevel.entries.firstOrNull { it.levelNumber == parsed.optInt("verificationLevel", -1) }
+        } else {
+            null
+        }
+        val fCat = parsed?.optString("failureCategory")?.takeIf { it.isNotBlank() }?.let { raw ->
+            runCatching { ComputerUseFailureCategory.valueOf(raw) }.getOrNull()
+        }
+        val suggested = parsed?.optString("suggestedRecovery")?.ifBlank { null }
+        val verifiedLabel = if (result.status == ToolExecutionStatus.SUCCEEDED && (vLevel == null || vLevel.levelNumber >= 1)) {
+            "${call.toolName}: ${result.displaySummary}".take(96)
+        } else {
+            null
+        }
+        collector.send(
+            AgentEvent.SubgoalProgressUpdated(
+                taskId = taskId,
+                subgoal = goal.take(80),
+                lastVerifiedAction = verifiedLabel,
+                nextPlannedAction = suggested?.take(96),
+                verificationLevel = vLevel,
+                failureCategory = fCat
+            )
+        )
+    }
+
+    /**
+     * Condenses large UI node arrays in older TOOL messages so multi-step reasoning stays within
+     * context budgets while preserving the most recent screen state verbatim.
+     */
+    private fun condenseOlderScreenPayloads(workingHistory: MutableList<ChatMessage>) {
+        for (i in workingHistory.indices) {
+            val msg = workingHistory[i]
+            if (msg.role != MessageRole.TOOL) continue
+            val obj = runCatching { JSONObject(msg.content) }.getOrNull() ?: continue
+            val screen = obj.optJSONObject("screen")
+                ?: obj.takeIf { it.has("nodes") && it.has("snapshotId") }
+                ?: continue
+            if (!screen.has("nodes")) continue
+            val nodeCount = screen.optJSONArray("nodes")?.length() ?: 0
+            screen.remove("nodes")
+            screen.put("nodesCondensed", true)
+            screen.put("condensedNodeCount", nodeCount)
+            workingHistory[i] = msg.copy(content = obj.toString())
+        }
     }
 
     private fun buildPlanIfAny(

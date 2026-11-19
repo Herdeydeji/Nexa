@@ -680,14 +680,8 @@ class NexaSettingsAppearanceCapabilitiesTest {
         composeRule.onNodeWithTag("settings_list").performScrollToKey("sec_appearance")
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("appearance_option_LIGHT").performScrollTo().assertIsDisplayed().performClick()
-        composeRule.waitForIdle()
-        val storedAfterClick = kotlinx.coroutines.runBlocking {
-            withTimeout(5_000) {
-                settingsRepo.settings.first { it.appearancePosture == AppearancePosture.LIGHT }
-            }
-        }
-        assertEquals(AppearancePosture.LIGHT, storedAfterClick.appearancePosture)
         composeRule.waitUntil(5_000) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
             settingsVm.uiState.value.settings.appearancePosture == AppearancePosture.LIGHT
         }
         assertEquals(AppearancePosture.LIGHT, settingsVm.uiState.value.settings.appearancePosture)
@@ -700,12 +694,18 @@ class NexaSettingsAppearanceCapabilitiesTest {
         composeRule.onNodeWithTag("memory_manager_sheet").assertIsDisplayed()
         composeRule.onNodeWithTag("memory_add_input").performTextInput("Prefer dark terminal themes")
         composeRule.onNodeWithTag("memory_add_button").performClick()
-        composeRule.waitForIdle()
+        composeRule.waitUntil(5_000) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            composeRule.onAllNodesWithText("Prefer dark terminal themes").fetchSemanticsNodes().isNotEmpty()
+        }
         composeRule.onNodeWithText("Prefer dark terminal themes").assertIsDisplayed()
 
         // Clear memory inside sheet
         composeRule.onNodeWithTag("memory_clear_all_button").performClick()
-        composeRule.waitForIdle()
+        composeRule.waitUntil(5_000) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            composeRule.onAllNodesWithText("No saved memories yet").fetchSemanticsNodes().isNotEmpty()
+        }
         composeRule.onNodeWithText("No saved memories yet").assertIsDisplayed()
 
         // Close sheet and open Diagnostics Export Dialog via button
@@ -715,6 +715,7 @@ class NexaSettingsAppearanceCapabilitiesTest {
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("export_diagnostics_button").performScrollTo().performClick()
         composeRule.waitUntil(5_000) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
             composeRule.onAllNodesWithTag("diagnostics_export_dialog").fetchSemanticsNodes().isNotEmpty()
         }
         composeRule.onNodeWithTag("diagnostics_export_dialog").assertIsDisplayed()

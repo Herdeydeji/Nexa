@@ -7,6 +7,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import com.example.domain.model.ObservedUiNode
 import com.example.domain.model.ScreenObservation
 import com.example.domain.model.UiBounds
+import com.example.domain.model.WindowDialogType
 import java.security.MessageDigest
 
 interface RawNodeAdapter {
@@ -26,6 +27,9 @@ interface RawNodeAdapter {
     val isVisibleToUser: Boolean
     val isPassword: Boolean
     val inputType: Int
+    val isLongClickable: Boolean get() = false
+    val isSelected: Boolean get() = false
+    val supportedActionNames: List<String> get() = emptyList()
     val childCount: Int
     fun childAt(index: Int): RawNodeAdapter?
 }
@@ -73,6 +77,28 @@ class AndroidAccessibilityNodeAdapter(
         get() = runCatching { node.isPassword }.getOrDefault(false)
     override val inputType: Int
         get() = runCatching { node.inputType }.getOrDefault(InputType.TYPE_NULL)
+    override val isLongClickable: Boolean
+        get() = runCatching { node.isLongClickable }.getOrDefault(false)
+    override val isSelected: Boolean
+        get() = runCatching { node.isSelected }.getOrDefault(false)
+    override val supportedActionNames: List<String>
+        get() = runCatching {
+            node.actionList.mapNotNull { action ->
+                when (action.id) {
+                    AccessibilityNodeInfo.ACTION_CLICK -> "CLICK"
+                    AccessibilityNodeInfo.ACTION_LONG_CLICK -> "LONG_CLICK"
+                    AccessibilityNodeInfo.ACTION_SET_TEXT -> "SET_TEXT"
+                    AccessibilityNodeInfo.ACTION_PASTE -> "PASTE"
+                    AccessibilityNodeInfo.ACTION_SCROLL_FORWARD -> "SCROLL_FORWARD"
+                    AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD -> "SCROLL_BACKWARD"
+                    AccessibilityNodeInfo.ACTION_FOCUS -> "FOCUS"
+                    AccessibilityNodeInfo.ACTION_SELECT -> "SELECT"
+                    else -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                        action.id == AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id
+                    ) "IME_ENTER" else null
+                }
+            }.distinct()
+        }.getOrDefault(emptyList())
     override val childCount: Int
         get() = runCatching { node.childCount }.getOrDefault(0)
 
@@ -93,7 +119,10 @@ class AccessibilityNodeInspector(
         root: AccessibilityNodeInfo?,
         activePackageName: String?,
         windowTitle: String?,
-        timestampMillis: Long = System.currentTimeMillis()
+        timestampMillis: Long = System.currentTimeMillis(),
+        screenWidthPx: Int = 1080,
+        screenHeightPx: Int = 2400,
+        isKeyboardVisible: Boolean = false
     ): ScreenObservation {
         if (root == null) {
             return ScreenObservation(
@@ -102,6 +131,12 @@ class AccessibilityNodeInspector(
                 windowTitle = windowTitle,
                 isInteractive = false,
                 isRestrictedWindow = true,
+                screenWidthPx = screenWidthPx,
+                screenHeightPx = screenHeightPx,
+                isKeyboardVisible = isKeyboardVisible,
+                hasSparseHierarchy = true,
+                hierarchyCompleteness = 0f,
+                screenSummary = "Restricted or empty accessibility window for ${activePackageName ?: "foreground"}",
                 observationError = "Active window root is unavailable or protected by the system (for example a secure/FLAG_SECURE window or transition)."
             )
         }
@@ -109,7 +144,10 @@ class AccessibilityNodeInspector(
             root = AndroidAccessibilityNodeAdapter(root),
             activePackageName = activePackageName ?: runCatching { root.packageName?.toString() }.getOrNull(),
             windowTitle = windowTitle,
-            timestampMillis = timestampMillis
+            timestampMillis = timestampMillis,
+            screenWidthPx = screenWidthPx,
+            screenHeightPx = screenHeightPx,
+            isKeyboardVisible = isKeyboardVisible
         )
     }
 
@@ -117,14 +155,21 @@ class AccessibilityNodeInspector(
         root: RawNodeAdapter,
         activePackageName: String?,
         windowTitle: String?,
-        timestampMillis: Long = System.currentTimeMillis()
+        timestampMillis: Long = System.currentTimeMillis(),
+        screenWidthPx: Int = 1080,
+        screenHeightPx: Int = 2400,
+        isKeyboardVisible: Boolean = false
     ): ScreenObservation {
         val emitted = mutableListOf<ObservedUiNode>()
+        val childMap = mutableMapOf<Int, MutableList<Int>>()
         val seenSignatures = HashSet<String>()
         var visitedCount = 0
         var truncated = false
+        var hasProgressBar = false
+        var webViewCount = 0
+        var unlabeledClickableCount = 0
 
-        fun traverse(node: RawNodeAdapter, depth: Int) {
+        fun traverse(node: RawNodeAdapter, depth: Int, parentEmittedIdx: Int?) {
             if (visitedCount >= maxVisitedNodes || emitted.size >= maxEmittedNodes || depth > maxDepth) {
                 truncated = true
                 return
@@ -137,6 +182,14 @@ class AccessibilityNodeInspector(
             val rawText = node.text?.trim()?.takeIf { it.isNotEmpty() }
             val rawDesc = node.contentDescription?.trim()?.takeIf { it.isNotEmpty() }
             val rawHint = node.hintText?.trim()?.takeIf { it.isNotEmpty() }
+
+            val lowerClass = node.className?.lowercase().orEmpty()
+            if (lowerClass.contains("progressbar")) {
+                hasProgressBar = true
+            }
+            if (lowerClass.contains("webview")) {
+                webViewCount++
+            }
 
             val sensitive = isSensitiveNode(node, rawViewId, rawHint, rawDesc)
             val safeText = when {
@@ -160,13 +213,17 @@ class AccessibilityNodeInspector(
                 node.isCheckable ||
                 (rawViewId != null && bounds.width > 0 && bounds.height > 0)
 
+            var currentEmittedIdx = parentEmittedIdx
             if (hasMeaningfulContent && bounds.width >= 0 && bounds.height >= 0) {
-                // Deduplicate identical wrapper/repeated non-editable text nodes at same bounds
                 val dedupeKey = "${role}|${safeText.orEmpty()}|${safeDesc.orEmpty()}|${rawViewId.orEmpty()}|${bounds.toCompactString()}"
                 if (seenSignatures.add(dedupeKey)) {
+                    val idx = emitted.size
+                    if (node.isClickable && safeText == null && safeDesc == null && rawHint == null) {
+                        unlabeledClickableCount++
+                    }
                     emitted.add(
                         ObservedUiNode(
-                            index = emitted.size,
+                            index = idx,
                             viewId = rawViewId,
                             className = node.className?.substringAfterLast('.'),
                             role = role,
@@ -183,9 +240,17 @@ class AccessibilityNodeInspector(
                             enabled = node.isEnabled,
                             isPassword = node.isPassword,
                             isSensitiveRedacted = sensitive,
-                            depth = depth
+                            depth = depth,
+                            parentIndex = parentEmittedIdx,
+                            longClickable = node.isLongClickable,
+                            selected = node.isSelected,
+                            supportedActions = node.supportedActionNames
                         )
                     )
+                    if (parentEmittedIdx != null) {
+                        childMap.getOrPut(parentEmittedIdx) { mutableListOf() }.add(idx)
+                    }
+                    currentEmittedIdx = idx
                 }
             }
 
@@ -196,27 +261,119 @@ class AccessibilityNodeInspector(
                     break
                 }
                 val child = node.childAt(i) ?: continue
-                traverse(child, depth + 1)
+                traverse(child, depth + 1, currentEmittedIdx)
             }
         }
 
-        traverse(root, 0)
+        traverse(root, 0, null)
 
-        val signature = computeSignature(activePackageName, windowTitle, emitted)
+        val finalNodes = emitted.map { node ->
+            val children = childMap[node.index]
+            if (children.isNullOrEmpty()) node else node.copy(childIndices = children.toList())
+        }
+
+        val dialogType = classifyDialogType(activePackageName, finalNodes)
+        val loadingTextHit = finalNodes.any { n ->
+            val txt = (n.text ?: n.contentDescription).orEmpty().lowercase()
+            txt == "loading..." || txt == "loading" || txt.contains("buffering") || txt.contains("please wait")
+        }
+        val isLoadingLikely = hasProgressBar || (loadingTextHit && finalNodes.size <= 5)
+
+        val labeledNodes = finalNodes.count {
+            !it.text.isNullOrBlank() || !it.contentDescription.isNullOrBlank() || !it.hintText.isNullOrBlank()
+        }
+        val completeness = when {
+            finalNodes.isEmpty() -> 0f
+            webViewCount > 0 && labeledNodes <= 3 -> 0.25f
+            finalNodes.size <= 3 && labeledNodes <= 1 -> 0.3f
+            unlabeledClickableCount > labeledNodes && unlabeledClickableCount >= 3 -> 0.45f
+            else -> (labeledNodes.toFloat() / finalNodes.size.toFloat()).coerceIn(0.35f, 1.0f)
+        }
+        val hasSparseHierarchy = completeness < 0.5f || finalNodes.size <= 2 || (webViewCount > 0 && labeledNodes <= 3)
+
+        val keyboardInferred = isKeyboardVisible ||
+            (finalNodes.any { it.focused && it.editable } && activePackageName?.contains("inputmethod", ignoreCase = true) == true)
+
+        val summary = buildScreenSummary(
+            pkg = activePackageName,
+            nodes = finalNodes,
+            dialogType = dialogType,
+            isLoading = isLoadingLikely,
+            keyboardVisible = keyboardInferred,
+            sparse = hasSparseHierarchy
+        )
+
+        val signature = computeSignature(activePackageName, windowTitle, finalNodes)
         return ScreenObservation(
             timestampMillis = timestampMillis,
             activePackageName = activePackageName,
             windowTitle = windowTitle,
-            windowType = "application",
+            windowType = if (dialogType == WindowDialogType.SYSTEM_PERMISSION) "system" else "application",
             isInteractive = true,
             isDeviceLocked = false,
             isRestrictedWindow = false,
-            nodes = emitted,
+            nodes = finalNodes,
             totalNodesVisited = visitedCount,
             truncatedByLimit = truncated,
             observationError = null,
-            hierarchySignature = signature
+            hierarchySignature = signature,
+            screenWidthPx = screenWidthPx,
+            screenHeightPx = screenHeightPx,
+            isKeyboardVisible = keyboardInferred,
+            dialogType = dialogType,
+            isLoadingLikely = isLoadingLikely,
+            hierarchyCompleteness = completeness,
+            hasSparseHierarchy = hasSparseHierarchy,
+            screenSummary = summary
         )
+    }
+
+    internal fun classifyDialogType(pkg: String?, nodes: List<ObservedUiNode>): WindowDialogType {
+        val cleanPkg = pkg?.trim()?.lowercase().orEmpty()
+        if (cleanPkg == "com.transsion.applock") return WindowDialogType.APPLOCK
+        if (cleanPkg in setOf(
+                "com.android.permissioncontroller",
+                "com.google.android.permissioncontroller",
+                "com.android.packageinstaller",
+                "com.google.android.packageinstaller"
+            )
+        ) {
+            return WindowDialogType.SYSTEM_PERMISSION
+        }
+        val hasPermHint = nodes.any { n ->
+            val vid = n.viewId?.lowercase().orEmpty()
+            vid.contains("permission_") || vid.contains("grant_dialog")
+        }
+        if (hasPermHint) return WindowDialogType.SYSTEM_PERMISSION
+
+        val hasDialogHint = nodes.any { n ->
+            val vid = n.viewId?.lowercase().orEmpty()
+            val cls = n.className?.lowercase().orEmpty()
+            vid.contains("alerttitle") || vid == "button1" || vid == "button2" || cls.contains("dialog")
+        }
+        return if (hasDialogHint) WindowDialogType.APP_DIALOG else WindowDialogType.NONE
+    }
+
+    private fun buildScreenSummary(
+        pkg: String?,
+        nodes: List<ObservedUiNode>,
+        dialogType: WindowDialogType,
+        isLoading: Boolean,
+        keyboardVisible: Boolean,
+        sparse: Boolean
+    ): String = buildString {
+        append(pkg ?: "unknown_app")
+        append(": ${nodes.size} nodes")
+        val editCount = nodes.count { it.editable }
+        val clickCount = nodes.count { it.clickable }
+        val scrollCount = nodes.count { it.scrollable }
+        if (clickCount > 0) append(", $clickCount clickable")
+        if (editCount > 0) append(", $editCount editable")
+        if (scrollCount > 0) append(", $scrollCount scrollable")
+        if (keyboardVisible) append(", IME keyboard open")
+        if (dialogType != WindowDialogType.NONE) append(", dialog=${dialogType.name}")
+        if (isLoading) append(", loading=true")
+        if (sparse) append(", sparse_tree=true")
     }
 
     internal fun isSensitiveNode(
@@ -307,9 +464,9 @@ class AccessibilityNodeInspector(
     }
 
     companion object {
-        const val DEFAULT_MAX_DEPTH = 14
-        const val DEFAULT_MAX_VISITED_NODES = 160
-        const val DEFAULT_MAX_EMITTED_NODES = 65
+        const val DEFAULT_MAX_DEPTH = 16
+        const val DEFAULT_MAX_VISITED_NODES = 200
+        const val DEFAULT_MAX_EMITTED_NODES = 75
         const val DEFAULT_MAX_TEXT_LENGTH = 120
         const val REDACTED_VALUE = "[REDACTED_SENSITIVE]"
 

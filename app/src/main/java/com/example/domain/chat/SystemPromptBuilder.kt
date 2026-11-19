@@ -34,14 +34,14 @@ class SystemPromptBuilder {
             append("\n\nAutonomous Agent & Computer-Use Guidelines:\n")
             append(
                 "- Answer general knowledge, coding, and explanation questions directly without invoking device tools.\n" +
-                    "- Dynamically select and chain general-purpose tools (such as list_installed_apps, find_app, launch_app, open_url, play_on_youtube, observe_screen, tap_element, type_text, scroll_screen, press_enter, press_back, wait_for_screen_change, take_screenshot) when they are available in this session.\n" +
-                    "- App discovery and launching (list_installed_apps, find_app, launch_app, open_url) work natively on Android without requiring Accessibility Service.\n" +
+                    "- Run a closed-loop cycle inside external Android apps: OBSERVE -> UNDERSTAND -> PLAN -> ACT -> WAIT -> VERIFY -> REASON -> CONTINUE. Never execute blind multi-step sequences without verifying each UI transition.\n" +
+                    "- General-purpose tools: app discovery/launch (list_installed_apps, find_app, launch_app, open_url, play_on_youtube), screen understanding (observe_screen, wait_for_screen_change, wait_for_element, take_screenshot), and UI interaction (tap_element, double_tap_element, long_press_element, tap_coordinates, swipe_screen, drag_and_drop, type_text, edit_text_field, scroll_screen, press_back, press_home, press_enter).\n" +
+                    "- Ground targets safely using the latest observe_screen snapshot: prefer view_id, exact text/content_description, or node_index paired with snapshot_id (plus anchor_context or region when duplicate labels exist). When accessibility hierarchy is sparse or image-based, Nexa automatically fuses on-device OCR text regions.\n" +
+                    "- Never treat a gesture dispatch (verificationLevel = 0 / NO_UI_EFFECT) as verified completion. Check post-action screen observations, verificationLevel (0..4), and failureCategory / suggestedRecovery to adapt strategy (scroll if offscreen, press_back if keyboard blocks target, wait_for_element while loading, dismiss unexpected dialogs).\n" +
                     "- For opening and playing a specific song or video on YouTube, prefer play_on_youtube(query) when available, and report playback as started ONLY if the tool returns PLAYBACK_STARTED; otherwise report truthfully that search opened or playback could not be verified.\n" +
-                    "- If launch_app or find_app returns AMBIGUOUS candidates, wait for or ask the user to choose the intended app instead of guessing.\n" +
-                    "- If launch_app or play_on_youtube returns BLOCKED_BY_APPLOCK, do NOT attempt to tap AppLock or repeatedly relaunch the app. Nexa waits automatically for the user to unlock on device.\n" +
-                    "- When Accessibility tools are available, call observe_screen (or inspect post-action screen observations) before tapping or typing into elements so you use real observed text, view IDs, or node indices.\n" +
-                    "- Verify resulting screen state after each action. Never claim a launch, tap, typing action, playback, capture, or navigation succeeded unless the tool result verified it.\n" +
-                    "- Do not repeat identical observe_screen or wait_for_screen_change calls when screen state is unchanged; adapt your action or explain the blocker honestly.\n" +
+                    "- If launch_app, find_app, or a UI action returns AMBIGUOUS or UI_AMBIGUOUS candidates, ask the user to choose instead of guessing.\n" +
+                    "- If a tool returns BLOCKED_BY_APPLOCK, do NOT attempt to tap AppLock or repeatedly relaunch the app. Nexa waits automatically for the user to unlock on device.\n" +
+                    "- Do not repeat identical failing actions or observe_screen calls when screen state is unchanged; adapt your selector, scroll, navigate back, or explain the blocker honestly.\n" +
                     "- Do not attempt to send messages, place calls, confirm payments, or delete user data without explicit user confirmation."
             )
             if (settings.localMemoryEnabled && activeDefs.any { it.name == "save_memory_note" }) {

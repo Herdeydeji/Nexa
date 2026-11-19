@@ -7,7 +7,9 @@ import android.media.AudioManager
 import android.net.Uri
 import com.example.android.accessibility.AccessibilityInteractionController
 import com.example.android.accessibility.AndroidScreenObserver
+import com.example.android.accessibility.GroundingOutcome
 import com.example.android.accessibility.InteractionDispatchResult
+import com.example.android.accessibility.UiElementGroundingEngine
 import com.example.android.app.AndroidAppDiscovery
 import com.example.android.app.AndroidAppLauncher
 import com.example.android.app.AppDiscoveryBatch
@@ -16,12 +18,16 @@ import com.example.domain.model.AccessibilityRuntimeState
 import com.example.domain.model.AppLaunchOutcome
 import com.example.domain.model.AppLaunchStatus
 import com.example.domain.model.AppLookupOutcome
+import com.example.domain.model.AttachmentPayload
 import com.example.domain.model.ComputerUseActionOutcome
+import com.example.domain.model.ComputerUseFailureCategory
 import com.example.domain.model.ObservedUiNode
 import com.example.domain.model.ScreenObservation
 import com.example.domain.model.ScreenshotCaptureOutcome
 import com.example.domain.model.ScrollDirection
 import com.example.domain.model.TargetResolutionSpec
+import com.example.domain.model.TextEditMode
+import com.example.domain.model.VerificationLevel
 import com.example.domain.model.YouTubePlayOutcome
 import com.example.domain.model.YouTubePlayStatus
 import kotlinx.coroutines.currentCoroutineContext
@@ -46,6 +52,9 @@ open class AndroidActionRuntime(
 ) {
 
     open fun isAutomationActive(): Boolean = permissionManager.isAccessibilityReady()
+
+    fun consumeLatestSparseVisualAttachment(expectedSnapshotId: Long? = null): AttachmentPayload? =
+        screenObserver.consumeLatestSparseVisualAttachment(expectedSnapshotId)
 
     open fun listInstalledApps(
         query: String? = null,
@@ -79,7 +88,8 @@ open class AndroidActionRuntime(
                 action = "open_url",
                 summary = "Invalid URL '$url'. Provide a complete http:// or https:// URL.",
                 verificationDetail = "URL validation failed before dispatch.",
-                errorCode = "INVALID_URL"
+                errorCode = "INVALID_URL",
+                verificationLevel = VerificationLevel.LEVEL_0_DISPATCHED
             )
         }
 
@@ -89,7 +99,8 @@ open class AndroidActionRuntime(
                 action = "open_url",
                 summary = "No Android Context or intent starter available to open URL.",
                 verificationDetail = "Missing Android Context.",
-                errorCode = "UNSUPPORTED"
+                errorCode = "UNSUPPORTED",
+                verificationLevel = VerificationLevel.LEVEL_0_DISPATCHED
             )
 
         val before = if (permissionManager.isAccessibilityReady()) screenObserver.observe() else null
@@ -114,7 +125,8 @@ open class AndroidActionRuntime(
                 summary = dispatchError,
                 verificationDetail = "ACTION_VIEW dispatch failed.",
                 beforePackage = before?.activePackageName,
-                errorCode = "OPEN_URL_FAILED"
+                errorCode = "OPEN_URL_FAILED",
+                verificationLevel = VerificationLevel.LEVEL_0_DISPATCHED
             )
         }
 
@@ -124,7 +136,8 @@ open class AndroidActionRuntime(
                 action = "open_url",
                 summary = "Dispatched Android browser intent for $clean (foreground verification unavailable without Accessibility).",
                 verificationDetail = "Intent dispatched; Accessibility service is disabled.",
-                beforePackage = before?.activePackageName
+                beforePackage = before?.activePackageName,
+                verificationLevel = VerificationLevel.LEVEL_0_DISPATCHED
             )
         }
 
@@ -139,7 +152,9 @@ open class AndroidActionRuntime(
                 afterPackage = after.activePackageName,
                 screenChanged = changed,
                 postObservation = after,
-                errorCode = "BLOCKED_BY_APPLOCK"
+                errorCode = "BLOCKED_BY_APPLOCK",
+                verificationLevel = VerificationLevel.LEVEL_1_SCREEN_CHANGED,
+                failureCategory = ComputerUseFailureCategory.APPLOCK_OR_AUTH_REQUIRED
             )
         }
 
@@ -151,7 +166,12 @@ open class AndroidActionRuntime(
             beforePackage = before?.activePackageName,
             afterPackage = after.activePackageName,
             screenChanged = changed,
-            postObservation = after
+            postObservation = after,
+            verificationLevel = if (changed) {
+                VerificationLevel.LEVEL_3_SUBGOAL_CONFIRMED
+            } else {
+                VerificationLevel.LEVEL_1_SCREEN_CHANGED
+            }
         )
     }
 
@@ -283,7 +303,6 @@ open class AndroidActionRuntime(
             )
         }
 
-        // Wait briefly for search results to populate and pick the best grounded result
         val resultsObs = waitForYouTubeResults(verification.observation)
         val candidate = selectBestYouTubeResultCandidate(resultsObs, cleanQuery)
         if (candidate == null) {
@@ -315,7 +334,6 @@ open class AndroidActionRuntime(
             )
         }
 
-        // Observe after tapping video and verify real playback signals
         val playerVerify = actionVerifier.verifyUiAction(
             actionName = "play_on_youtube",
             before = resultsObs,
@@ -393,13 +411,95 @@ open class AndroidActionRuntime(
             afterPackage = obs.activePackageName,
             screenChanged = changed,
             postObservation = obs,
-            errorCode = if (obs.observationError != null) "OBSERVATION_ERROR" else null
+            errorCode = if (obs.observationError != null) "OBSERVATION_ERROR" else null,
+            verificationLevel = if (changed) {
+                VerificationLevel.LEVEL_1_SCREEN_CHANGED
+            } else {
+                VerificationLevel.LEVEL_0_DISPATCHED
+            }
+        )
+    }
+
+    open suspend fun waitForElement(
+        spec: TargetResolutionSpec,
+        timeoutMillis: Long = 4_000L
+    ): ComputerUseActionOutcome {
+        currentCoroutineContext().ensureActive()
+        val permError = checkAccessibilityGate("wait_for_element")
+        if (permError != null) return permError
+
+        val bounded = timeoutMillis.coerceIn(300L, 10_000L)
+        val deadline = System.currentTimeMillis() + bounded
+        var lastObs = screenObserver.observe()
+
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            when (val res = UiElementGroundingEngine.resolve(lastObs, spec, spec.editableOnly)) {
+                is GroundingOutcome.Resolved -> {
+                    return ComputerUseActionOutcome(
+                        success = true,
+                        action = "wait_for_element",
+                        summary = "Element '${UiElementGroundingEngine.describeCandidate(res.node)}' is visible on screen.",
+                        verificationDetail = res.explanation.rationale,
+                        afterPackage = lastObs.activePackageName,
+                        screenChanged = true,
+                        postObservation = lastObs,
+                        verificationLevel = VerificationLevel.LEVEL_2_TARGET_STATE_MUTATED,
+                        groundingExplanation = res.explanation
+                    )
+                }
+                else -> Unit
+            }
+            val remaining = deadline - System.currentTimeMillis()
+            if (remaining <= 0L) break
+            val (_, nextObs) = screenObserver.waitForChange(minOf(remaining, 700L))
+            lastObs = nextObs
+            if (remaining <= 200L) delay(100L)
+        }
+
+        val diagnosis = FailureDiagnosisEngine.diagnose(
+            actionName = "wait_for_element",
+            errorCode = "TARGET_NOT_FOUND",
+            detail = "Target element did not appear within ${bounded}ms.",
+            before = null,
+            after = lastObs,
+            targetSpec = spec
+        )
+        return ComputerUseActionOutcome(
+            success = false,
+            action = "wait_for_element",
+            summary = "Element did not appear within ${bounded}ms.",
+            verificationDetail = diagnosis?.summary ?: "Element not found.",
+            afterPackage = lastObs.activePackageName,
+            postObservation = lastObs,
+            errorCode = "TARGET_NOT_FOUND",
+            verificationLevel = VerificationLevel.LEVEL_0_DISPATCHED,
+            failureCategory = diagnosis?.category,
+            suggestedRecovery = diagnosis?.recoverySuggestion
         )
     }
 
     open suspend fun tapElement(spec: TargetResolutionSpec): ComputerUseActionOutcome =
         runVerifiedInteraction(
             actionName = "tap_element",
+            targetSpec = spec,
+            validate = {
+                if (spec.nodeIndex == null && spec.viewId.isNullOrBlank() &&
+                    spec.text.isNullOrBlank() && spec.contentDescription.isNullOrBlank() &&
+                    spec.anchorContext.isNullOrBlank()
+                ) {
+                    "Provide at least one target selector: node_index, view_id, text, content_description, or anchor_context."
+                } else {
+                    null
+                }
+            },
+            execute = { before -> interactionController.tapElement(spec, before) }
+        )
+
+    open suspend fun doubleTapElement(spec: TargetResolutionSpec): ComputerUseActionOutcome =
+        runVerifiedInteraction(
+            actionName = "double_tap_element",
+            targetSpec = spec,
             validate = {
                 if (spec.nodeIndex == null && spec.viewId.isNullOrBlank() &&
                     spec.text.isNullOrBlank() && spec.contentDescription.isNullOrBlank()
@@ -409,12 +509,13 @@ open class AndroidActionRuntime(
                     null
                 }
             },
-            execute = { before -> interactionController.tapElement(spec, before) }
+            execute = { before -> interactionController.doubleTapElement(spec, before) }
         )
 
     open suspend fun longPressElement(spec: TargetResolutionSpec): ComputerUseActionOutcome =
         runVerifiedInteraction(
             actionName = "long_press_element",
+            targetSpec = spec,
             validate = {
                 if (spec.nodeIndex == null && spec.viewId.isNullOrBlank() &&
                     spec.text.isNullOrBlank() && spec.contentDescription.isNullOrBlank()
@@ -436,12 +537,68 @@ open class AndroidActionRuntime(
             execute = { interactionController.tapCoordinates(x, y) }
         )
 
-    open suspend fun typeText(spec: TargetResolutionSpec?, text: String): ComputerUseActionOutcome =
+    open suspend fun swipeScreen(
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+        durationMs: Long = 320L
+    ): ComputerUseActionOutcome =
         runVerifiedInteraction(
-            actionName = "type_text",
-            validate = { null },
-            expectedEnteredText = text,
-            execute = { before -> interactionController.typeText(spec, text, before) }
+            actionName = "swipe_screen",
+            validate = {
+                if (startX < 0f || startY < 0f || endX < 0f || endY < 0f) {
+                    "Swipe coordinates must be non-negative."
+                } else {
+                    null
+                }
+            },
+            execute = { interactionController.swipe(startX, startY, endX, endY, durationMs) }
+        )
+
+    open suspend fun dragAndDrop(
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+        durationMs: Long = 750L
+    ): ComputerUseActionOutcome =
+        runVerifiedInteraction(
+            actionName = "drag_and_drop",
+            validate = {
+                if (startX < 0f || startY < 0f || endX < 0f || endY < 0f) {
+                    "Drag coordinates must be non-negative."
+                } else {
+                    null
+                }
+            },
+            execute = { interactionController.dragAndDrop(startX, startY, endX, endY, durationMs) }
+        )
+
+    open suspend fun typeText(spec: TargetResolutionSpec?, text: String): ComputerUseActionOutcome =
+        editTextField(spec, TextEditMode.REPLACE, text)
+
+    open suspend fun editTextField(
+        spec: TargetResolutionSpec?,
+        mode: TextEditMode,
+        text: String?
+    ): ComputerUseActionOutcome =
+        runVerifiedInteraction(
+            actionName = if (mode == TextEditMode.REPLACE) "type_text" else "edit_text_field",
+            targetSpec = spec,
+            validate = {
+                if ((mode == TextEditMode.REPLACE || mode == TextEditMode.APPEND) && text == null) {
+                    "Parameter 'text' is required for mode '${mode.apiValue}'."
+                } else {
+                    null
+                }
+            },
+            expectedEnteredText = when (mode) {
+                TextEditMode.REPLACE, TextEditMode.APPEND, TextEditMode.PASTE -> text
+                TextEditMode.CLEAR -> ""
+                TextEditMode.SELECT_ALL -> null
+            },
+            execute = { before -> interactionController.editTextField(spec, mode, text, before) }
         )
 
     open suspend fun scrollScreen(direction: ScrollDirection, targetViewId: String? = null): ComputerUseActionOutcome =
@@ -525,7 +682,6 @@ open class AndroidActionRuntime(
                     score += matchedTokens * 25
                     if (matchedTokens == 0 && query.isNotBlank()) score -= 5
                 }
-                // Grounded recency tie-breaker: ONLY when upload age text is genuinely present on screen
                 if (recentHints.any { lower.contains(it) }) {
                     score += 12
                 }
@@ -571,6 +727,7 @@ open class AndroidActionRuntime(
 
     private suspend fun runVerifiedInteraction(
         actionName: String,
+        targetSpec: TargetResolutionSpec? = null,
         validate: () -> String?,
         expectedEnteredText: String? = null,
         execute: suspend (ScreenObservation) -> InteractionDispatchResult
@@ -582,7 +739,8 @@ open class AndroidActionRuntime(
                 action = actionName,
                 summary = validationError,
                 verificationDetail = "Validation failed before execution.",
-                errorCode = "INVALID_ARGUMENT"
+                errorCode = "INVALID_ARGUMENT",
+                verificationLevel = VerificationLevel.LEVEL_0_DISPATCHED
             )
         }
 
@@ -590,7 +748,7 @@ open class AndroidActionRuntime(
         val permError = checkAccessibilityGate(actionName)
         if (permError != null) return permError
 
-        val before = screenObserver.observe()
+        var before = screenObserver.observe()
         if (before.observationError != null && before.isDeviceLocked) {
             return ComputerUseActionOutcome(
                 success = false,
@@ -598,24 +756,60 @@ open class AndroidActionRuntime(
                 summary = before.observationError,
                 verificationDetail = "Device screen is locked.",
                 beforePackage = before.activePackageName,
-                errorCode = "DEVICE_LOCKED"
+                errorCode = "DEVICE_LOCKED",
+                verificationLevel = VerificationLevel.LEVEL_0_DISPATCHED,
+                failureCategory = ComputerUseFailureCategory.APPLOCK_OR_AUTH_REQUIRED
             )
         }
 
         currentCoroutineContext().ensureActive()
-        val dispatch = execute(before)
+        var dispatch = execute(before)
+
+        // Confirmed Phase 1 rule: on ambiguous/low-confidence UI match, re-inspect fresh screen context once before asking user.
+        if (!dispatch.executed && (dispatch.errorCode == "AMBIGUOUS_TARGET" || dispatch.errorCode == "LOW_CONFIDENCE_MATCH")) {
+            delay(180L)
+            currentCoroutineContext().ensureActive()
+            val reinspected = screenObserver.observe()
+            val retryDispatch = execute(reinspected)
+            if (retryDispatch.executed) {
+                before = reinspected
+                dispatch = retryDispatch.copy(staleNodeRefreshed = true)
+            } else {
+                dispatch = retryDispatch.copy(staleNodeRefreshed = true)
+            }
+        }
+
         if (!dispatch.executed) {
             val afterFail = screenObserver.observe()
+            val effectiveCode = if (dispatch.errorCode == "AMBIGUOUS_TARGET" || dispatch.errorCode == "LOW_CONFIDENCE_MATCH") {
+                "UI_AMBIGUOUS"
+            } else {
+                dispatch.errorCode ?: "ACTION_FAILED"
+            }
+            val diagnosis = FailureDiagnosisEngine.diagnose(
+                actionName = actionName,
+                errorCode = effectiveCode,
+                detail = dispatch.detail,
+                before = before,
+                after = afterFail,
+                targetSpec = targetSpec,
+                verificationLevel = VerificationLevel.LEVEL_0_DISPATCHED
+            )
             return ComputerUseActionOutcome(
                 success = false,
                 action = actionName,
                 summary = dispatch.detail,
-                verificationDetail = "Interaction was not executed (${dispatch.errorCode ?: "FAILED"}).",
+                verificationDetail = diagnosis?.summary ?: "Interaction was not executed ($effectiveCode).",
                 beforePackage = before.activePackageName,
                 afterPackage = afterFail.activePackageName,
                 screenChanged = afterFail.hierarchySignature != before.hierarchySignature,
                 postObservation = afterFail,
-                errorCode = dispatch.errorCode ?: "ACTION_FAILED"
+                errorCode = effectiveCode,
+                verificationLevel = VerificationLevel.LEVEL_0_DISPATCHED,
+                failureCategory = diagnosis?.category,
+                groundingExplanation = dispatch.explanation,
+                suggestedRecovery = diagnosis?.recoverySuggestion,
+                ambiguousCandidates = dispatch.ambiguousCandidates
             )
         }
 
@@ -626,7 +820,25 @@ open class AndroidActionRuntime(
             expectedEnteredText = expectedEnteredText
         )
 
-        val refreshedNote = if (dispatch.staleNodeRefreshed) " (refreshed stale node)" else ""
+        val refreshedNote = if (dispatch.staleNodeRefreshed) " (re-inspected context)" else ""
+        val failureErrorCode = when {
+            verification.verified -> null
+            expectedEnteredText != null -> "VERIFICATION_INCONCLUSIVE"
+            else -> "NO_UI_EFFECT"
+        }
+        val diagnosis = if (!verification.verified) {
+            FailureDiagnosisEngine.diagnose(
+                actionName = actionName,
+                errorCode = failureErrorCode,
+                detail = verification.detail,
+                before = before,
+                after = verification.afterObservation,
+                targetSpec = targetSpec,
+                verificationLevel = verification.verificationLevel
+            )
+        } else {
+            null
+        }
         return ComputerUseActionOutcome(
             success = verification.verified,
             action = actionName,
@@ -636,7 +848,11 @@ open class AndroidActionRuntime(
             afterPackage = verification.afterObservation.activePackageName,
             screenChanged = verification.screenChanged,
             postObservation = verification.afterObservation,
-            errorCode = if (verification.verified) null else "VERIFICATION_INCONCLUSIVE"
+            errorCode = failureErrorCode,
+            verificationLevel = verification.verificationLevel,
+            failureCategory = diagnosis?.category,
+            groundingExplanation = dispatch.explanation,
+            suggestedRecovery = diagnosis?.recoverySuggestion
         )
     }
 
@@ -651,7 +867,9 @@ open class AndroidActionRuntime(
                 summary = "Nexa Accessibility Service is disabled. Enable it in Android Settings > Accessibility > Nexa Computer-Use Service before running '$actionName'.",
                 verificationDetail = perm.accessibilityReason,
                 errorCode = "ACCESSIBILITY_PERMISSION_REQUIRED",
-                requiresAccessibilityPermission = true
+                requiresAccessibilityPermission = true,
+                verificationLevel = VerificationLevel.LEVEL_0_DISPATCHED,
+                failureCategory = ComputerUseFailureCategory.MISSING_PERMISSION
             )
             AccessibilityRuntimeState.ENABLED_NOT_CONNECTED -> ComputerUseActionOutcome(
                 success = false,
@@ -659,28 +877,34 @@ open class AndroidActionRuntime(
                 summary = "Nexa Accessibility Service is enabled in Settings, but Android has not bound it yet. Re-toggle the service or wait briefly.",
                 verificationDetail = perm.accessibilityReason,
                 errorCode = "ACCESSIBILITY_NOT_CONNECTED",
-                requiresAccessibilityPermission = true
+                requiresAccessibilityPermission = true,
+                verificationLevel = VerificationLevel.LEVEL_0_DISPATCHED,
+                failureCategory = ComputerUseFailureCategory.MISSING_PERMISSION
             )
             AccessibilityRuntimeState.DEVICE_LOCKED -> ComputerUseActionOutcome(
                 success = false,
                 action = actionName,
                 summary = "Device screen is locked. Unlock the phone before running '$actionName'.",
                 verificationDetail = perm.accessibilityReason,
-                errorCode = "DEVICE_LOCKED"
+                errorCode = "DEVICE_LOCKED",
+                verificationLevel = VerificationLevel.LEVEL_0_DISPATCHED,
+                failureCategory = ComputerUseFailureCategory.APPLOCK_OR_AUTH_REQUIRED
             )
             AccessibilityRuntimeState.TEMPORARILY_UNAVAILABLE -> ComputerUseActionOutcome(
                 success = false,
                 action = actionName,
                 summary = perm.accessibilityReason,
                 verificationDetail = perm.accessibilityReason,
-                errorCode = "TEMPORARILY_UNAVAILABLE"
+                errorCode = "TEMPORARILY_UNAVAILABLE",
+                verificationLevel = VerificationLevel.LEVEL_0_DISPATCHED
             )
             AccessibilityRuntimeState.UNSUPPORTED -> ComputerUseActionOutcome(
                 success = false,
                 action = actionName,
                 summary = perm.accessibilityReason,
                 verificationDetail = perm.accessibilityReason,
-                errorCode = "UNSUPPORTED"
+                errorCode = "UNSUPPORTED",
+                verificationLevel = VerificationLevel.LEVEL_0_DISPATCHED
             )
         }
     }
@@ -691,10 +915,39 @@ open class AndroidActionRuntime(
             .put("action", outcome.action)
             .put("summary", outcome.summary)
             .put("verificationDetail", outcome.verificationDetail)
+            .put("verificationLevel", outcome.verificationLevel.levelNumber)
+            .put("verificationLabel", outcome.verificationLevel.label)
             .put("screenChanged", outcome.screenChanged)
         outcome.beforePackage?.let { obj.put("beforePackage", it) }
         outcome.afterPackage?.let { obj.put("afterPackage", it) }
         outcome.errorCode?.let { obj.put("errorCode", it) }
+        outcome.failureCategory?.let { obj.put("failureCategory", it.name) }
+        outcome.suggestedRecovery?.let { obj.put("suggestedRecovery", it) }
+        outcome.recoveryTried?.let { obj.put("recoveryTried", it) }
+        outcome.groundingExplanation?.let { g ->
+            obj.put(
+                "grounding",
+                JSONObject()
+                    .put("tier", g.level.tier)
+                    .put("method", g.level.name)
+                    .put("confidence", g.confidence.toDouble())
+                    .put("rationale", g.rationale)
+            )
+        }
+        if (outcome.ambiguousCandidates.isNotEmpty()) {
+            obj.put("status", "UI_AMBIGUOUS")
+            val candArr = JSONArray()
+            outcome.ambiguousCandidates.forEach { c ->
+                candArr.put(
+                    JSONObject()
+                        .put("node_index", c.index)
+                        .put("role", c.role)
+                        .put("label", c.text ?: c.contentDescription ?: c.hintText ?: c.viewId ?: "${c.role}[${c.index}]")
+                        .put("bounds", c.bounds.toCompactString())
+                )
+            }
+            obj.put("candidates", candArr)
+        }
         if (outcome.requiresAccessibilityPermission) {
             obj.put("permissionRequired", "ACCESSIBILITY_SERVICE")
             obj.put("howToEnable", "Open Android Settings -> Accessibility -> Nexa Computer-Use Service and turn it on.")

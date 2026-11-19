@@ -346,6 +346,7 @@ class ChatViewModel(
                 runState.runStatus == AgentRunStatus.WAITING_FOR_AMBIGUITY_CHOICE -> AgentStatus.WAITING_FOR_USER
             runState.pendingApproval != null || runState.runStatus == AgentRunStatus.AWAITING_APPROVAL -> AgentStatus.AWAITING_CONFIRMATION
             runState.runStatus == AgentRunStatus.SELECTING_TOOL ||
+                runState.runStatus == AgentRunStatus.LOCATING_TARGET ||
                 runState.runStatus == AgentRunStatus.EXECUTING_TOOL ||
                 runState.runStatus == AgentRunStatus.OBSERVING_RESULT -> AgentStatus.EXECUTING
             overlay.isResponding || runState.isRunning -> AgentStatus.THINKING
@@ -1294,6 +1295,7 @@ class ChatViewModel(
                     }
 
                     is AgentEvent.StatusChanged -> Unit
+                    is AgentEvent.SubgoalProgressUpdated -> Unit
                 }
             }
         } catch (ce: CancellationException) {

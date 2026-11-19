@@ -159,7 +159,14 @@ class FloatingIndicatorController(
                 FloatingIndicatorVisualState.WAITING_FOR_USER
             runState.pendingApproval != null || runState.runStatus == AgentRunStatus.AWAITING_APPROVAL ->
                 FloatingIndicatorVisualState.WAITING_FOR_USER
+            runState.runStatus == AgentRunStatus.RECOVERING ||
+                runState.executionPhase == com.example.domain.model.AgentExecutionPhase.RECOVERING ->
+                FloatingIndicatorVisualState.RECOVERING
+            runState.runStatus == AgentRunStatus.VERIFYING ||
+                runState.executionPhase == com.example.domain.model.AgentExecutionPhase.VERIFYING ->
+                FloatingIndicatorVisualState.VERIFYING
             runState.runStatus == AgentRunStatus.EXECUTING_TOOL ||
+                runState.runStatus == AgentRunStatus.LOCATING_TARGET ||
                 runState.runStatus == AgentRunStatus.SELECTING_TOOL ->
                 FloatingIndicatorVisualState.EXECUTING
             else -> FloatingIndicatorVisualState.THINKING
@@ -173,23 +180,42 @@ class FloatingIndicatorController(
 
         val blockerTitle = when {
             unlockWait != null -> unlockWait.title
-            ambiguity != null -> "Choose app for '${ambiguity.query}'"
+            ambiguity != null -> if (ambiguity.isUiElementSelection) {
+                "Choose UI target '${ambiguity.query}'"
+            } else {
+                "Choose app for '${ambiguity.query}'"
+            }
             approval != null -> "Approve ${approval.toolName}"
+            runState.latestFailureCategory != null && visualState == FloatingIndicatorVisualState.RECOVERING ->
+                runState.latestFailureCategory.label
             else -> null
         }
         val blockerMsg = when {
             unlockWait != null -> unlockWait.message
             ambiguity != null -> ambiguity.reason
             approval != null -> approval.intentSummary
+            runState.latestFailureCategory != null && visualState == FloatingIndicatorVisualState.RECOVERING ->
+                runState.nextPlannedAction ?: runState.statusDetail
             else -> null
         }
+        val autoExpand = visualState in setOf(
+            FloatingIndicatorVisualState.WAITING_FOR_USER,
+            FloatingIndicatorVisualState.RECOVERING,
+            FloatingIndicatorVisualState.BLOCKED
+        ) || unlockWait?.manualContinueRequired == true || ambiguity != null
 
         return FloatingIndicatorUiState(
             isVisible = canOverlay,
             visualState = visualState,
+            executionPhase = runState.executionPhase,
             taskId = activeTaskId,
             objective = objective,
-            currentAction = runState.statusDetail.ifBlank { visualState.label },
+            currentSubgoal = runState.currentSubgoal.ifBlank { objective },
+            currentAction = runState.statusDetail.ifBlank { runState.executionPhase.label },
+            lastVerifiedAction = runState.lastVerifiedAction,
+            nextPlannedAction = runState.nextPlannedAction,
+            verificationLevel = runState.latestVerificationLevel,
+            failureCategoryLabel = runState.latestFailureCategory?.label,
             targetAppName = runState.currentTargetAppName ?: unlockWait?.targetAppName,
             foregroundApp = liveForegroundPkg,
             completedSteps = runState.completedStepCount,
@@ -197,6 +223,7 @@ class FloatingIndicatorController(
             blockerTitle = blockerTitle,
             blockerMessage = blockerMsg,
             showManualContinue = unlockWait?.manualContinueRequired == true,
+            autoExpandOnState = autoExpand,
             canPause = !runState.isPaused && unlockWait == null && ambiguity == null && approval == null,
             canResume = runState.isPaused,
             canCancel = true,

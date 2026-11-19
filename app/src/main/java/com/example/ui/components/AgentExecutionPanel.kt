@@ -138,11 +138,12 @@ fun ExpandableAgentExecutionPanel(
                     } else if (!plan.isPreview && plan.verificationSummary != null) {
                         val ver = plan.verificationSummary
                         val fullyVerified = ver.isVerified && ver.objectiveVerified
+                        val levelSuffix = if (ver.maxVerificationLevel > 0) " L${ver.maxVerificationLevel}" else ""
                         StatusPill(
                             label = when {
-                                fullyVerified -> "VERIFIED"
+                                fullyVerified -> "VERIFIED$levelSuffix"
                                 ver.blockedCount > 0 -> "BLOCKED"
-                                else -> "PARTIAL"
+                                else -> "PARTIAL$levelSuffix"
                             },
                             textColor = if (fullyVerified) colors.success else colors.warning,
                             containerColor = if (fullyVerified) colors.successContainer else colors.warningContainer,
@@ -507,7 +508,11 @@ fun AmbiguitySelectionCard(
         borderColor = colors.orange.copy(alpha = 0.55f)
     ) {
         Text(
-            text = "Multiple apps match '${request.query}'",
+            text = if (request.isUiElementSelection) {
+                "Multiple UI controls match '${request.query}'"
+            } else {
+                "Multiple apps match '${request.query}'"
+            },
             style = MaterialTheme.typography.titleSmall,
             color = colors.textPrimary
         )
@@ -520,6 +525,7 @@ fun AmbiguitySelectionCard(
         Spacer(modifier = Modifier.height(10.dp))
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             request.candidates.take(5).forEachIndexed { index, candidate ->
+                val detail = candidate.subtitle ?: candidate.packageName
                 OutlinedButton(
                     onClick = { onSelectCandidate(candidate.packageName) },
                     modifier = Modifier
@@ -528,7 +534,7 @@ fun AmbiguitySelectionCard(
                         .testTag("ambiguity_option_$index")
                 ) {
                     Text(
-                        text = "${candidate.displayName} (${candidate.packageName})",
+                        text = "${candidate.displayName} ($detail)",
                         color = colors.textPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis

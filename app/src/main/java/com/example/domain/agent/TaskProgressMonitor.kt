@@ -60,12 +60,20 @@ class TaskProgressMonitor(
 
         val statusTag = parsed?.optString("status").orEmpty()
         val errorCode = parsed?.optString("errorCode").orEmpty()
+        val failureCategory = parsed?.optString("failureCategory").orEmpty()
+        val verificationLevel = if (parsed != null && parsed.has("verificationLevel")) {
+            parsed.optInt("verificationLevel", -1)
+        } else {
+            -1
+        }
 
-        // Explicit user-action waits (AppLock or ambiguity prompt) are blocking pauses, not blind loops.
+        // Explicit user-action waits (AppLock or app/UI ambiguity prompt) are blocking pauses, not blind loops.
         if (statusTag == "BLOCKED_BY_APPLOCK" ||
             errorCode == "BLOCKED_BY_APPLOCK" ||
             statusTag == "AMBIGUOUS" ||
-            errorCode == "APP_AMBIGUOUS"
+            statusTag == "UI_AMBIGUOUS" ||
+            errorCode == "APP_AMBIGUOUS" ||
+            errorCode == "UI_AMBIGUOUS"
         ) {
             lastMeaningfulProgressAt = now
             return ProgressCheckOutcome.NeutralWait(snapshot(now))
@@ -76,7 +84,9 @@ class TaskProgressMonitor(
                 it.optString("observedForegroundPackage").ifBlank {
                     it.optString("foreground_package").ifBlank {
                         it.optString("afterPackage").ifBlank {
-                            it.optString("activePackageName").ifBlank { null }
+                            it.optString("activePackageName").ifBlank {
+                                it.optJSONObject("screen")?.optString("activePackageName")?.ifBlank { null }
+                            }
                         }
                     }
                 }
@@ -100,21 +110,30 @@ class TaskProgressMonitor(
             lastObservationTimestamp = now
         }
 
-        val isObservationTool = call.toolName == "observe_screen" || call.toolName == "wait_for_screen_change"
+        val isObservationTool = call.toolName in setOf(
+            "observe_screen",
+            "wait_for_screen_change",
+            "wait_for_element"
+        )
         val isLookupTool = call.toolName == "find_app" || call.toolName == "list_installed_apps"
 
         val repeatedSameCall = (callSig == lastCallSignature)
         lastCallSignature = callSig
         consecutiveRepeatedActions = if (repeatedSameCall) consecutiveRepeatedActions + 1 else 0
 
+        val waitElementFound = call.toolName == "wait_for_element" && parsed?.optBoolean("found", false) == true
+        val level0NoEffect = verificationLevel == 0 || errorCode == "NO_UI_EFFECT"
+
         val meaningfulProgress = when {
             result.status != ToolExecutionStatus.SUCCEEDED -> false
+            waitElementFound -> true
             foregroundChanged || screenSignatureChanged -> true
             screenChangedFlag == true -> true
+            verificationLevel >= 1 -> true
             call.toolName == "play_on_youtube" && statusTag == "PLAYBACK_STARTED" -> true
             call.toolName == "launch_app" && (statusTag == "FOREGROUND_VERIFIED" || statusTag == "LAUNCH_DISPATCHED") -> true
             call.toolName == "open_url" && (statusTag == "FOREGROUND_VERIFIED" || statusTag == "LAUNCH_DISPATCHED") -> true
-            !isObservationTool && !isLookupTool && screenChangedFlag != false -> true
+            !isObservationTool && !isLookupTool && !level0NoEffect && screenChangedFlag != false -> true
             else -> false
         }
 
@@ -126,15 +145,15 @@ class TaskProgressMonitor(
             return ProgressCheckOutcome.Progressed(snapshot(now))
         }
 
-        if (isObservationTool && !foregroundChanged && !screenSignatureChanged) {
+        if (isObservationTool && !foregroundChanged && !screenSignatureChanged && !waitElementFound) {
             consecutiveUnchangedObservations += 1
-        } else if (screenChangedFlag == false) {
+        } else if (screenChangedFlag == false || level0NoEffect) {
             consecutiveUnchangedObservations += 1
         }
 
         val noStateChange = !foregroundChanged &&
             !screenSignatureChanged &&
-            (screenChangedFlag == false || repeatedSameCall || isObservationTool || result.status != ToolExecutionStatus.SUCCEEDED)
+            (screenChangedFlag == false || level0NoEffect || repeatedSameCall || isObservationTool || result.status != ToolExecutionStatus.SUCCEEDED)
 
         if (noStateChange) {
             noProgressCycleCount += 1
@@ -153,7 +172,7 @@ class TaskProgressMonitor(
             consecutiveUnchangedObservations >= limit ||
             consecutiveRepeatedActions >= limit
         ) {
-            val blocker = classifyBlocker(parsed, statusTag, currentForegroundPackage)
+            val blocker = classifyBlocker(parsed, statusTag, failureCategory, currentForegroundPackage)
             return ProgressCheckOutcome.HaltNoProgress(
                 reason = reason,
                 blockerClassification = blocker,
@@ -183,13 +202,13 @@ class TaskProgressMonitor(
     private fun buildScreenSignature(toolName: String, obj: JSONObject): String? {
         val explicitSig = obj.optString("hierarchySignature").ifBlank { null }
         if (explicitSig != null) return explicitSig
-        val postObs = obj.optJSONObject("postObservation")
-        if (postObs != null) {
-            val sig = postObs.optString("hierarchySignature").ifBlank { null }
+        val screenObj = obj.optJSONObject("screen") ?: obj.optJSONObject("postObservation")
+        if (screenObj != null) {
+            val sig = screenObj.optString("hierarchySignature").ifBlank { null }
             if (sig != null) return sig
-            val pkg = postObs.optString("activePackageName")
-            val nodes = postObs.optJSONArray("nodes")?.length() ?: 0
-            if (pkg.isNotBlank() || nodes > 0) return "$pkg|$nodes|${postObs.optString("windowTitle")}"
+            val pkg = screenObj.optString("activePackageName")
+            val nodes = screenObj.optJSONArray("nodes")?.length() ?: screenObj.optInt("visibleNodeCount", 0)
+            if (pkg.isNotBlank() || nodes > 0) return "$pkg|$nodes|${screenObj.optString("windowTitle")}"
         }
         val pkg = obj.optString("activePackageName").ifBlank { obj.optString("observed_foreground_package") }
         val nodes = obj.optJSONArray("nodes")?.length() ?: obj.optInt("nodeCount", -1)
@@ -204,8 +223,10 @@ class TaskProgressMonitor(
     private fun classifyBlocker(
         parsed: JSONObject?,
         statusTag: String,
+        failureCategory: String,
         fgPkg: String?
     ): String = when {
+        failureCategory.isNotBlank() -> failureCategory
         statusTag == "BLOCKED_BY_APPLOCK" || fgPkg == "com.transsion.applock" -> "BLOCKED_BY_APPLOCK"
         statusTag == "BLOCKED_BY_DIALOG" -> "BLOCKED_BY_DIALOG"
         statusTag == "PLAYBACK_UNVERIFIED" -> "PLAYBACK_UNVERIFIED"

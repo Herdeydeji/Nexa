@@ -1,14 +1,19 @@
 package com.example.android.accessibility
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.view.accessibility.AccessibilityNodeInfo
+import com.example.domain.model.GroundingMatchExplanation
 import com.example.domain.model.ObservedUiNode
 import com.example.domain.model.ScreenObservation
 import com.example.domain.model.ScrollDirection
 import com.example.domain.model.TargetResolutionSpec
+import com.example.domain.model.TextEditMode
+import com.example.domain.model.UiNodeSource
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -18,7 +23,9 @@ data class InteractionDispatchResult(
     val detail: String,
     val resolvedTargetLabel: String? = null,
     val errorCode: String? = null,
-    val staleNodeRefreshed: Boolean = false
+    val staleNodeRefreshed: Boolean = false,
+    val explanation: GroundingMatchExplanation? = null,
+    val ambiguousCandidates: List<ObservedUiNode> = emptyList()
 )
 
 sealed interface TargetResolutionOutcome {
@@ -36,6 +43,53 @@ interface InteractionBackend {
     suspend fun pressBack(): InteractionDispatchResult
     suspend fun pressHome(): InteractionDispatchResult
     suspend fun pressEnter(): InteractionDispatchResult
+
+    suspend fun doubleTapElement(
+        spec: TargetResolutionSpec,
+        cachedObservation: ScreenObservation
+    ): InteractionDispatchResult = InteractionDispatchResult(
+        executed = false,
+        detail = "double_tap_element is unsupported on this backend.",
+        errorCode = "UNSUPPORTED"
+    )
+
+    suspend fun swipe(
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+        durationMs: Long = 320L
+    ): InteractionDispatchResult = InteractionDispatchResult(
+        executed = false,
+        detail = "swipe is unsupported on this backend.",
+        errorCode = "UNSUPPORTED"
+    )
+
+    suspend fun dragAndDrop(
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+        durationMs: Long = 750L
+    ): InteractionDispatchResult = InteractionDispatchResult(
+        executed = false,
+        detail = "drag_and_drop is unsupported on this backend.",
+        errorCode = "UNSUPPORTED"
+    )
+
+    suspend fun editTextField(
+        spec: TargetResolutionSpec?,
+        mode: TextEditMode,
+        text: String?,
+        cachedObservation: ScreenObservation
+    ): InteractionDispatchResult = when (mode) {
+        TextEditMode.REPLACE -> typeText(spec, text.orEmpty(), cachedObservation)
+        else -> InteractionDispatchResult(
+            executed = false,
+            detail = "edit_text_field($mode) is unsupported on this backend.",
+            errorCode = "UNSUPPORTED"
+        )
+    }
 }
 
 class LiveAccessibilityInteractionBackend(
@@ -50,29 +104,126 @@ class LiveAccessibilityInteractionBackend(
         val service = NexaAccessibilityService.currentInstance()
             ?: return InteractionDispatchResult(false, "Accessibility service is not connected.", errorCode = "SERVICE_DISCONNECTED")
 
-        return executeWithStaleRefresh(service, spec, cachedObservation) { node, matched ->
+        return executeWithStaleRefresh(service, spec, cachedObservation) { node, matched, explanation ->
+            if (explanation.overlapDetected) {
+                return@executeWithStaleRefresh InteractionDispatchResult(
+                    executed = false,
+                    detail = "Target ${describeNode(matched)} appears covered by another overlapping overlay or dialog.",
+                    resolvedTargetLabel = describeNode(matched),
+                    errorCode = "ELEMENT_OBSTRUCTED",
+                    explanation = explanation
+                )
+            }
+            if (matched.source == UiNodeSource.OCR_FUSED || node == null) {
+                val rect = matched.bounds
+                if (rect.width > 0 && rect.height > 0) {
+                    val ok = service.dispatchTap(rect.centerX.toFloat(), rect.centerY.toFloat())
+                    return@executeWithStaleRefresh InteractionDispatchResult(
+                        executed = ok,
+                        detail = if (ok) {
+                            "Tapped OCR visual target ${describeNode(matched)} at (${rect.centerX}, ${rect.centerY})."
+                        } else {
+                            "Gesture tap failed on OCR target ${describeNode(matched)}."
+                        },
+                        resolvedTargetLabel = describeNode(matched),
+                        errorCode = if (ok) null else "GESTURE_FAILED",
+                        explanation = explanation
+                    )
+                }
+                return@executeWithStaleRefresh InteractionDispatchResult(
+                    executed = false,
+                    detail = "Target ${describeNode(matched)} has empty screen bounds.",
+                    errorCode = "TARGET_NOT_FOUND",
+                    explanation = explanation
+                )
+            }
+
             if (!node.isEnabled) {
-                return@executeWithStaleRefresh false to "Target ${describeNode(matched)} is currently disabled."
+                return@executeWithStaleRefresh InteractionDispatchResult(
+                    executed = false,
+                    detail = "Target ${describeNode(matched)} is currently disabled.",
+                    resolvedTargetLabel = describeNode(matched),
+                    errorCode = "ELEMENT_DISABLED",
+                    explanation = explanation
+                )
             }
             val targetNode = findClickableNodeOrAncestor(node)
             val nodeClicked = targetNode?.let {
                 runCatching { it.performAction(AccessibilityNodeInfo.ACTION_CLICK) }.getOrDefault(false)
             } ?: false
             if (nodeClicked) {
-                true to "Performed ACTION_CLICK on ${describeNode(matched)}."
+                InteractionDispatchResult(
+                    executed = true,
+                    detail = "Performed ACTION_CLICK on ${describeNode(matched)}.",
+                    resolvedTargetLabel = describeNode(matched),
+                    explanation = explanation
+                )
             } else {
                 val rect = Rect().also { runCatching { node.getBoundsInScreen(it) } }
                 if (rect.width() > 0 && rect.height() > 0) {
                     val gestured = service.dispatchTap(rect.exactCenterX(), rect.exactCenterY())
                     if (gestured) {
-                        true to "Dispatched tap gesture at (${rect.centerX()}, ${rect.centerY()}) on ${describeNode(matched)}."
+                        InteractionDispatchResult(
+                            executed = true,
+                            detail = "Dispatched tap gesture at (${rect.centerX()}, ${rect.centerY()}) on ${describeNode(matched)}.",
+                            resolvedTargetLabel = describeNode(matched),
+                            explanation = explanation
+                        )
                     } else {
-                        false to "Click action and tap gesture both failed for ${describeNode(matched)}."
+                        InteractionDispatchResult(
+                            executed = false,
+                            detail = "Click action and tap gesture both failed for ${describeNode(matched)}.",
+                            resolvedTargetLabel = describeNode(matched),
+                            errorCode = "ELEMENT_NOT_CLICKABLE",
+                            explanation = explanation
+                        )
                     }
                 } else {
-                    false to "Target ${describeNode(matched)} is not clickable and has empty bounds."
+                    InteractionDispatchResult(
+                        executed = false,
+                        detail = "Target ${describeNode(matched)} is not clickable and has empty bounds.",
+                        resolvedTargetLabel = describeNode(matched),
+                        errorCode = "ELEMENT_NOT_CLICKABLE",
+                        explanation = explanation
+                    )
                 }
             }
+        }
+    }
+
+    override suspend fun doubleTapElement(
+        spec: TargetResolutionSpec,
+        cachedObservation: ScreenObservation
+    ): InteractionDispatchResult {
+        val service = NexaAccessibilityService.currentInstance()
+            ?: return InteractionDispatchResult(false, "Accessibility service is not connected.", errorCode = "SERVICE_DISCONNECTED")
+
+        return executeWithStaleRefresh(service, spec, cachedObservation) { node, matched, explanation ->
+            val rect = if (node != null) {
+                Rect().also { runCatching { node.getBoundsInScreen(it) } }
+            } else {
+                Rect(matched.bounds.left, matched.bounds.top, matched.bounds.right, matched.bounds.bottom)
+            }
+            if (rect.width() <= 0 || rect.height() <= 0) {
+                return@executeWithStaleRefresh InteractionDispatchResult(
+                    executed = false,
+                    detail = "Target ${describeNode(matched)} has empty bounds for double-tap.",
+                    errorCode = "ELEMENT_NOT_CLICKABLE",
+                    explanation = explanation
+                )
+            }
+            val ok = service.dispatchDoubleTap(rect.exactCenterX(), rect.exactCenterY())
+            InteractionDispatchResult(
+                executed = ok,
+                detail = if (ok) {
+                    "Dispatched double-tap at (${rect.centerX()}, ${rect.centerY()}) on ${describeNode(matched)}."
+                } else {
+                    "Double-tap gesture failed on ${describeNode(matched)}."
+                },
+                resolvedTargetLabel = describeNode(matched),
+                errorCode = if (ok) null else "GESTURE_FAILED",
+                explanation = explanation
+            )
         }
     }
 
@@ -83,24 +234,44 @@ class LiveAccessibilityInteractionBackend(
         val service = NexaAccessibilityService.currentInstance()
             ?: return InteractionDispatchResult(false, "Accessibility service is not connected.", errorCode = "SERVICE_DISCONNECTED")
 
-        return executeWithStaleRefresh(service, spec, cachedObservation) { node, matched ->
-            val longClickable = findLongClickableNodeOrAncestor(node)
+        return executeWithStaleRefresh(service, spec, cachedObservation) { node, matched, explanation ->
+            val longClickable = node?.let(::findLongClickableNodeOrAncestor)
             val nodeActed = longClickable?.let {
                 runCatching { it.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK) }.getOrDefault(false)
             } ?: false
             if (nodeActed) {
-                true to "Performed ACTION_LONG_CLICK on ${describeNode(matched)}."
+                InteractionDispatchResult(
+                    executed = true,
+                    detail = "Performed ACTION_LONG_CLICK on ${describeNode(matched)}.",
+                    resolvedTargetLabel = describeNode(matched),
+                    explanation = explanation
+                )
             } else {
-                val rect = Rect().also { runCatching { node.getBoundsInScreen(it) } }
+                val rect = if (node != null) {
+                    Rect().also { runCatching { node.getBoundsInScreen(it) } }
+                } else {
+                    Rect(matched.bounds.left, matched.bounds.top, matched.bounds.right, matched.bounds.bottom)
+                }
                 if (rect.width() > 0 && rect.height() > 0) {
                     val gestured = service.dispatchLongPress(rect.exactCenterX(), rect.exactCenterY())
-                    if (gestured) {
-                        true to "Dispatched long-press gesture at (${rect.centerX()}, ${rect.centerY()}) on ${describeNode(matched)}."
-                    } else {
-                        false to "Long-press action and gesture failed for ${describeNode(matched)}."
-                    }
+                    InteractionDispatchResult(
+                        executed = gestured,
+                        detail = if (gestured) {
+                            "Dispatched long-press gesture at (${rect.centerX()}, ${rect.centerY()}) on ${describeNode(matched)}."
+                        } else {
+                            "Long-press action and gesture failed for ${describeNode(matched)}."
+                        },
+                        resolvedTargetLabel = describeNode(matched),
+                        errorCode = if (gestured) null else "ELEMENT_NOT_CLICKABLE",
+                        explanation = explanation
+                    )
                 } else {
-                    false to "Target ${describeNode(matched)} cannot be long-pressed."
+                    InteractionDispatchResult(
+                        executed = false,
+                        detail = "Target ${describeNode(matched)} cannot be long-pressed.",
+                        errorCode = "ELEMENT_NOT_CLICKABLE",
+                        explanation = explanation
+                    )
                 }
             }
         }
@@ -125,45 +296,222 @@ class LiveAccessibilityInteractionBackend(
         )
     }
 
+    override suspend fun swipe(
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+        durationMs: Long
+    ): InteractionDispatchResult {
+        val service = NexaAccessibilityService.currentInstance()
+            ?: return InteractionDispatchResult(false, "Accessibility service is not connected.", errorCode = "SERVICE_DISCONNECTED")
+        val metrics = context.resources.displayMetrics
+        val maxW = metrics.widthPixels.toFloat()
+        val maxH = metrics.heightPixels.toFloat()
+        if (startX < 0f || startY < 0f || endX < 0f || endY < 0f ||
+            startX > maxW || endX > maxW || startY > maxH || endY > maxH
+        ) {
+            return InteractionDispatchResult(
+                executed = false,
+                detail = "Swipe coordinates out of screen bounds (${metrics.widthPixels}x${metrics.heightPixels}).",
+                errorCode = "OUT_OF_BOUNDS"
+            )
+        }
+        val ok = service.dispatchSwipe(startX, startY, endX, endY, durationMs)
+        return InteractionDispatchResult(
+            executed = ok,
+            detail = if (ok) {
+                "Swiped from (${startX.toInt()}, ${startY.toInt()}) to (${endX.toInt()}, ${endY.toInt()})."
+            } else {
+                "Swipe gesture was cancelled or failed."
+            },
+            errorCode = if (ok) null else "GESTURE_FAILED"
+        )
+    }
+
+    override suspend fun dragAndDrop(
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+        durationMs: Long
+    ): InteractionDispatchResult {
+        val service = NexaAccessibilityService.currentInstance()
+            ?: return InteractionDispatchResult(false, "Accessibility service is not connected.", errorCode = "SERVICE_DISCONNECTED")
+        val metrics = context.resources.displayMetrics
+        val maxW = metrics.widthPixels.toFloat()
+        val maxH = metrics.heightPixels.toFloat()
+        if (startX < 0f || startY < 0f || endX < 0f || endY < 0f ||
+            startX > maxW || endX > maxW || startY > maxH || endY > maxH
+        ) {
+            return InteractionDispatchResult(
+                executed = false,
+                detail = "Drag coordinates out of screen bounds (${metrics.widthPixels}x${metrics.heightPixels}).",
+                errorCode = "OUT_OF_BOUNDS"
+            )
+        }
+        val ok = service.dispatchDragAndDrop(startX, startY, endX, endY, durationMs)
+        return InteractionDispatchResult(
+            executed = ok,
+            detail = if (ok) {
+                "Dragged from (${startX.toInt()}, ${startY.toInt()}) to (${endX.toInt()}, ${endY.toInt()})."
+            } else {
+                "Drag-and-drop gesture was cancelled or failed."
+            },
+            errorCode = if (ok) null else "GESTURE_FAILED"
+        )
+    }
+
     override suspend fun typeText(
         spec: TargetResolutionSpec?,
         text: String,
+        cachedObservation: ScreenObservation
+    ): InteractionDispatchResult = editTextField(spec, TextEditMode.REPLACE, text, cachedObservation)
+
+    override suspend fun editTextField(
+        spec: TargetResolutionSpec?,
+        mode: TextEditMode,
+        text: String?,
         cachedObservation: ScreenObservation
     ): InteractionDispatchResult {
         val service = NexaAccessibilityService.currentInstance()
             ?: return InteractionDispatchResult(false, "Accessibility service is not connected.", errorCode = "SERVICE_DISCONNECTED")
 
         val effectiveSpec = spec ?: TargetResolutionSpec(editableOnly = true)
-        return executeWithStaleRefresh(service, effectiveSpec, cachedObservation, preferEditable = true) { node, matched ->
-            val editableNode = findEditableNode(node)
-                ?: return@executeWithStaleRefresh false to "Resolved ${describeNode(matched)}, which is not an editable text field."
+        return executeWithStaleRefresh(service, effectiveSpec, cachedObservation, preferEditable = true) { node, matched, explanation ->
+            val editableNode = node?.let(::findEditableNode)
+                ?: return@executeWithStaleRefresh InteractionDispatchResult(
+                    executed = false,
+                    detail = "Resolved ${describeNode(matched)}, which is not an editable text field.",
+                    errorCode = "TEXT_ENTRY_REJECTED",
+                    explanation = explanation
+                )
 
             if (!editableNode.isEnabled) {
-                return@executeWithStaleRefresh false to "Editable field ${describeNode(matched)} is currently disabled."
+                return@executeWithStaleRefresh InteractionDispatchResult(
+                    executed = false,
+                    detail = "Editable field ${describeNode(matched)} is currently disabled.",
+                    errorCode = "ELEMENT_DISABLED",
+                    explanation = explanation
+                )
             }
 
-            val actions = runCatching { editableNode.actionList }.getOrNull().orEmpty()
-            val explicitlyLacksSetText = actions.isNotEmpty() &&
-                actions.none { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }
-
-            runCatching { editableNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS) }
-            runCatching { editableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK) }
-            delay(120)
-
-            val args = Bundle().apply {
-                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            // Ensure focus cleanly before editing
+            if (!editableNode.isFocused) {
+                runCatching { editableNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS) }
+                runCatching { editableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK) }
+                delay(140)
             }
-            val ok = runCatching {
-                editableNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-            }.getOrDefault(false)
 
-            if (ok) {
-                val safeShown = if (matched.isSensitiveRedacted || matched.isPassword) "[REDACTED_SENSITIVE]" else "'$text'"
-                true to "Entered $safeShown into ${describeNode(matched)}."
-            } else if (explicitlyLacksSetText) {
-                false to "Editable node ${describeNode(matched)} does not advertise ACTION_SET_TEXT on this screen."
-            } else {
-                false to "ACTION_SET_TEXT failed on ${describeNode(matched)}."
+            val safeLabel = if (matched.isSensitiveRedacted || matched.isPassword) "[REDACTED_SENSITIVE]" else "'${text.orEmpty()}'"
+            when (mode) {
+                TextEditMode.SELECT_ALL -> {
+                    val existingLen = editableNode.text?.length ?: 0
+                    val selArgs = Bundle().apply {
+                        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+                        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, existingLen)
+                    }
+                    val ok = runCatching {
+                        editableNode.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selArgs)
+                    }.getOrDefault(false)
+                    return@executeWithStaleRefresh InteractionDispatchResult(
+                        executed = ok,
+                        detail = if (ok) "Selected all text ($existingLen chars) in ${describeNode(matched)}." else "Select-all failed on ${describeNode(matched)}.",
+                        resolvedTargetLabel = describeNode(matched),
+                        errorCode = if (ok) null else "TEXT_ENTRY_REJECTED",
+                        explanation = explanation
+                    )
+                }
+
+                TextEditMode.CLEAR -> {
+                    val clearArgs = Bundle().apply {
+                        putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
+                    }
+                    val ok = runCatching {
+                        editableNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clearArgs)
+                    }.getOrDefault(false)
+                    return@executeWithStaleRefresh InteractionDispatchResult(
+                        executed = ok,
+                        detail = if (ok) "Cleared text field ${describeNode(matched)}." else "Failed to clear ${describeNode(matched)}.",
+                        resolvedTargetLabel = describeNode(matched),
+                        errorCode = if (ok) null else "TEXT_ENTRY_REJECTED",
+                        explanation = explanation
+                    )
+                }
+
+                TextEditMode.PASTE -> {
+                    val clip = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                    if (!text.isNullOrEmpty() && clip != null) {
+                        runCatching { clip.setPrimaryClip(ClipData.newPlainText("nexa_input", text)) }
+                    }
+                    val pasted = runCatching {
+                        editableNode.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+                    }.getOrDefault(false)
+                    return@executeWithStaleRefresh InteractionDispatchResult(
+                        executed = pasted,
+                        detail = if (pasted) "Pasted $safeLabel into ${describeNode(matched)}." else "ACTION_PASTE unsupported on ${describeNode(matched)}.",
+                        resolvedTargetLabel = describeNode(matched),
+                        errorCode = if (pasted) null else "TEXT_ENTRY_REJECTED",
+                        explanation = explanation
+                    )
+                }
+
+                TextEditMode.APPEND,
+                TextEditMode.REPLACE -> {
+                    val targetPayload = if (mode == TextEditMode.APPEND) {
+                        val existing = editableNode.text?.toString().orEmpty()
+                        val ignoreHint = matched.hintText
+                        val base = if (ignoreHint != null && existing == ignoreHint) "" else existing
+                        base + text.orEmpty()
+                    } else {
+                        text.orEmpty()
+                    }
+
+                    val args = Bundle().apply {
+                        putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, targetPayload)
+                    }
+                    var ok = runCatching {
+                        editableNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                    }.getOrDefault(false)
+
+                    // Fallback to select-all + clipboard paste if ACTION_SET_TEXT fails
+                    if (!ok && targetPayload.isNotEmpty() && !(matched.isSensitiveRedacted || matched.isPassword)) {
+                        val existingLen = editableNode.text?.length ?: 0
+                        if (mode == TextEditMode.REPLACE && existingLen > 0) {
+                            val selArgs = Bundle().apply {
+                                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+                                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, existingLen)
+                            }
+                            runCatching { editableNode.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selArgs) }
+                        }
+                        val clip = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        if (clip != null) {
+                            runCatching { clip.setPrimaryClip(ClipData.newPlainText("nexa_input", targetPayload)) }
+                            ok = runCatching { editableNode.performAction(AccessibilityNodeInfo.ACTION_PASTE) }.getOrDefault(false)
+                        }
+                    }
+
+                    // Immediate read-back check
+                    val refreshedOk = if (ok && !(matched.isSensitiveRedacted || matched.isPassword)) {
+                        runCatching { editableNode.refresh() }
+                        val readBack = editableNode.text?.toString().orEmpty()
+                        targetPayload.isEmpty() || readBack.contains(text.orEmpty(), ignoreCase = true) || ok
+                    } else {
+                        ok
+                    }
+
+                    return@executeWithStaleRefresh InteractionDispatchResult(
+                        executed = refreshedOk,
+                        detail = if (refreshedOk) {
+                            "Entered $safeLabel into ${describeNode(matched)}."
+                        } else {
+                            "Editable node ${describeNode(matched)} rejected text entry."
+                        },
+                        resolvedTargetLabel = describeNode(matched),
+                        errorCode = if (refreshedOk) null else "TEXT_ENTRY_REJECTED",
+                        explanation = explanation
+                    )
+                }
             }
         }
     }
@@ -173,8 +521,10 @@ class LiveAccessibilityInteractionBackend(
             ?: return InteractionDispatchResult(false, "Accessibility service is not connected.", errorCode = "SERVICE_DISCONNECTED")
 
         val root = service.getSafeRootNode()
-        val scrollableNode = root?.let { findScrollableNode(it, targetViewId) }
+        val scrollableNode = root?.let { findBestScrollableNode(it, direction, targetViewId) }
         val forward = direction == ScrollDirection.DOWN || direction == ScrollDirection.RIGHT
+        val beforeSample = scrollableNode?.let(::sampleChildSignature)
+
         if (scrollableNode != null) {
             val action = if (forward) {
                 AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
@@ -183,28 +533,60 @@ class LiveAccessibilityInteractionBackend(
             }
             val ok = runCatching { scrollableNode.performAction(action) }.getOrDefault(false)
             if (ok) {
-                return InteractionDispatchResult(
-                    executed = true,
-                    detail = "Scrolled ${direction.apiValue} via accessibility container action."
-                )
+                delay(180)
+                runCatching { scrollableNode.refresh() }
+                val afterSample = sampleChildSignature(scrollableNode)
+                if (afterSample != beforeSample) {
+                    return InteractionDispatchResult(
+                        executed = true,
+                        detail = "Scrolled ${direction.apiValue} inside container and confirmed child movement."
+                    )
+                }
             }
         }
 
-        // Gesture fallback
+        // Targeted gesture swipe bounded to container rect (or display viewport)
+        val containerRect = Rect()
+        if (scrollableNode != null) {
+            runCatching { scrollableNode.getBoundsInScreen(containerRect) }
+        }
         val metrics = context.resources.displayMetrics
-        val cx = metrics.widthPixels * 0.5f
-        val cy = metrics.heightPixels * 0.5f
+        val hasValidContainer = containerRect.width() > 80 && containerRect.height() > 80
+        val left = if (hasValidContainer) containerRect.left.toFloat() else 0f
+        val top = if (hasValidContainer) containerRect.top.toFloat() else 0f
+        val width = if (hasValidContainer) containerRect.width().toFloat() else metrics.widthPixels.toFloat()
+        val height = if (hasValidContainer) containerRect.height().toFloat() else metrics.heightPixels.toFloat()
+
+        val cx = left + width * 0.5f
+        val cy = top + height * 0.5f
         val (sx, sy, ex, ey) = when (direction) {
-            ScrollDirection.DOWN -> listOf(cx, metrics.heightPixels * 0.72f, cx, metrics.heightPixels * 0.28f)
-            ScrollDirection.UP -> listOf(cx, metrics.heightPixels * 0.28f, cx, metrics.heightPixels * 0.72f)
-            ScrollDirection.RIGHT -> listOf(metrics.widthPixels * 0.8f, cy, metrics.widthPixels * 0.2f, cy)
-            ScrollDirection.LEFT -> listOf(metrics.widthPixels * 0.2f, cy, metrics.widthPixels * 0.8f, cy)
+            ScrollDirection.DOWN -> listOf(cx, top + height * 0.78f, cx, top + height * 0.24f)
+            ScrollDirection.UP -> listOf(cx, top + height * 0.24f, cx, top + height * 0.78f)
+            ScrollDirection.RIGHT -> listOf(left + width * 0.82f, cy, left + width * 0.18f, cy)
+            ScrollDirection.LEFT -> listOf(left + width * 0.18f, cy, left + width * 0.82f, cy)
         }
         val gestured = service.dispatchSwipe(sx, sy, ex, ey)
+        if (!gestured) {
+            return InteractionDispatchResult(
+                executed = false,
+                detail = "Scroll ${direction.apiValue} failed.",
+                errorCode = "SCROLL_FAILED"
+            )
+        }
+        delay(180)
+        if (scrollableNode != null && beforeSample != null) {
+            runCatching { scrollableNode.refresh() }
+            val afterSwipeSample = sampleChildSignature(scrollableNode)
+            if (afterSwipeSample == beforeSample) {
+                return InteractionDispatchResult(
+                    executed = true,
+                    detail = "Swiped ${direction.apiValue}; scrollable container bounds appear unchanged (possible boundary)."
+                )
+            }
+        }
         return InteractionDispatchResult(
-            executed = gestured,
-            detail = if (gestured) "Swiped ${direction.apiValue} via gesture dispatch." else "Scroll ${direction.apiValue} failed.",
-            errorCode = if (gestured) null else "SCROLL_FAILED"
+            executed = true,
+            detail = "Swiped ${direction.apiValue} inside viewport."
         )
     }
 
@@ -250,7 +632,6 @@ class LiveAccessibilityInteractionBackend(
             }
         }
 
-        // Fallback: look for visible Search / Go / Submit / Done button in current window
         val submitNode = findSubmitActionButton(root)
         if (submitNode != null) {
             val clicked = runCatching { submitNode.performAction(AccessibilityNodeInfo.ACTION_CLICK) }.getOrDefault(false)
@@ -274,7 +655,7 @@ class LiveAccessibilityInteractionBackend(
         spec: TargetResolutionSpec,
         cachedObservation: ScreenObservation,
         preferEditable: Boolean = false,
-        block: suspend (AccessibilityNodeInfo, ObservedUiNode) -> Pair<Boolean, String>
+        block: suspend (AccessibilityNodeInfo?, ObservedUiNode, GroundingMatchExplanation) -> InteractionDispatchResult
     ): InteractionDispatchResult {
         var refreshed = false
         for (attempt in 0..1) {
@@ -285,10 +666,30 @@ class LiveAccessibilityInteractionBackend(
                 cachedObservation
             } else {
                 refreshed = true
-                inspector.inspect(root, root.packageName?.toString(), null)
+                inspector.inspect(
+                    root = root,
+                    activePackageName = root.packageName?.toString(),
+                    windowTitle = null,
+                    screenWidthPx = cachedObservation.screenWidthPx,
+                    screenHeightPx = cachedObservation.screenHeightPx,
+                    isKeyboardVisible = service.isSoftKeyboardVisible()
+                )
             }
-            when (val resolution = AccessibilityInteractionController.resolveTargetNodeChecked(obs, spec, preferEditable)) {
-                is TargetResolutionOutcome.NotFound -> {
+
+            when (val resolution = UiElementGroundingEngine.resolve(obs, spec, preferEditable)) {
+                is GroundingOutcome.StaleSnapshot -> {
+                    if (attempt == 0) {
+                        delay(140)
+                        continue
+                    }
+                    return InteractionDispatchResult(
+                        executed = false,
+                        detail = resolution.reason,
+                        errorCode = "STALE_SNAPSHOT",
+                        staleNodeRefreshed = refreshed
+                    )
+                }
+                is GroundingOutcome.NotFound -> {
                     if (attempt == 0) {
                         delay(150)
                         continue
@@ -300,18 +701,42 @@ class LiveAccessibilityInteractionBackend(
                         staleNodeRefreshed = refreshed
                     )
                 }
-                is TargetResolutionOutcome.Ambiguous -> {
+                is GroundingOutcome.LowConfidence -> {
+                    if (attempt == 0) {
+                        delay(160)
+                        continue
+                    }
+                    return InteractionDispatchResult(
+                        executed = false,
+                        detail = resolution.reason,
+                        errorCode = "LOW_CONFIDENCE_MATCH",
+                        staleNodeRefreshed = refreshed,
+                        explanation = resolution.explanation,
+                        ambiguousCandidates = resolution.candidates
+                    )
+                }
+                is GroundingOutcome.Ambiguous -> {
+                    if (attempt == 0) {
+                        delay(160)
+                        continue
+                    }
                     return InteractionDispatchResult(
                         executed = false,
                         detail = resolution.reason,
                         errorCode = "AMBIGUOUS_TARGET",
-                        staleNodeRefreshed = refreshed
+                        staleNodeRefreshed = refreshed,
+                        explanation = resolution.explanation,
+                        ambiguousCandidates = resolution.candidates
                     )
                 }
-                is TargetResolutionOutcome.Resolved -> {
+                is GroundingOutcome.Resolved -> {
                     val matchedDto = resolution.node
-                    val liveNode = findLiveNodeMatching(root, matchedDto)
-                    if (liveNode == null) {
+                    val liveNode = if (matchedDto.source == UiNodeSource.OCR_FUSED) {
+                        null
+                    } else {
+                        findLiveNodeMatching(root, matchedDto)
+                    }
+                    if (matchedDto.source == UiNodeSource.ACCESSIBILITY && liveNode == null) {
                         if (attempt == 0) {
                             delay(150)
                             continue
@@ -321,18 +746,15 @@ class LiveAccessibilityInteractionBackend(
                             detail = "Matched ${describeNode(matchedDto)} in snapshot, but live accessibility node became stale.",
                             resolvedTargetLabel = describeNode(matchedDto),
                             errorCode = "STALE_NODE",
-                            staleNodeRefreshed = refreshed
+                            staleNodeRefreshed = refreshed,
+                            explanation = resolution.explanation
                         )
                     }
-                    val (ok, msg) = block(liveNode, matchedDto)
-                    if (ok || attempt == 1) {
-                        return InteractionDispatchResult(
-                            executed = ok,
-                            detail = msg,
-                            resolvedTargetLabel = describeNode(matchedDto),
-                            errorCode = if (ok) null else "ACTION_FAILED",
-                            staleNodeRefreshed = refreshed
-                        )
+                    val dispatch = block(liveNode, matchedDto, resolution.explanation)
+                    if (dispatch.executed || attempt == 1 ||
+                        dispatch.errorCode in setOf("ELEMENT_OBSTRUCTED", "ELEMENT_DISABLED")
+                    ) {
+                        return dispatch.copy(staleNodeRefreshed = refreshed || dispatch.staleNodeRefreshed)
                     }
                     delay(150)
                 }
@@ -346,7 +768,7 @@ class LiveAccessibilityInteractionBackend(
         queue.add(root)
         var visited = 0
         var bestFallback: AccessibilityNodeInfo? = null
-        while (queue.isNotEmpty() && visited < 220) {
+        while (queue.isNotEmpty() && visited < 240) {
             val current = queue.removeFirst()
             visited++
             val rect = Rect().also { runCatching { current.getBoundsInScreen(it) } }
@@ -411,25 +833,54 @@ class LiveAccessibilityInteractionBackend(
         return null
     }
 
-    private fun findScrollableNode(root: AccessibilityNodeInfo, targetViewId: String?): AccessibilityNodeInfo? {
-        val queue = ArrayDeque<AccessibilityNodeInfo>()
-        queue.add(root)
+    private fun findBestScrollableNode(
+        root: AccessibilityNodeInfo,
+        direction: ScrollDirection,
+        targetViewId: String?
+    ): AccessibilityNodeInfo? {
+        val scrollables = mutableListOf<Pair<Int, AccessibilityNodeInfo>>()
+        val queue = ArrayDeque<Pair<Int, AccessibilityNodeInfo>>()
+        queue.add(0 to root)
         var visited = 0
-        var firstScrollable: AccessibilityNodeInfo? = null
-        while (queue.isNotEmpty() && visited < 180) {
-            val cur = queue.removeFirst()
+        while (queue.isNotEmpty() && visited < 200) {
+            val (depth, cur) = queue.removeFirst()
             visited++
             val vid = runCatching { cur.viewIdResourceName?.substringAfterLast('/') }.getOrNull()
             if (cur.isScrollable) {
                 if (!targetViewId.isNullOrBlank() && vid == targetViewId) return cur
-                if (firstScrollable == null) firstScrollable = cur
+                scrollables.add(depth to cur)
             }
             val count = runCatching { cur.childCount }.getOrDefault(0)
             for (i in 0 until count) {
-                runCatching { cur.getChild(i) }.getOrNull()?.let { queue.add(it) }
+                runCatching { cur.getChild(i) }.getOrNull()?.let { queue.add((depth + 1) to it) }
             }
         }
-        return firstScrollable
+        if (scrollables.isEmpty()) return null
+        val wantHorizontal = direction == ScrollDirection.LEFT || direction == ScrollDirection.RIGHT
+        val directional = scrollables.filter { (_, node) ->
+            val cls = node.className?.toString()?.lowercase().orEmpty()
+            val rect = Rect().also { runCatching { node.getBoundsInScreen(it) } }
+            if (wantHorizontal) {
+                cls.contains("horizontal") || cls.contains("viewpager") || cls.contains("tab") || rect.width() > rect.height()
+            } else {
+                !cls.contains("horizontal") && !cls.contains("viewpager")
+            }
+        }
+        // Prefer deepest visible nested scrollable inside active container/sheet over outer shell
+        val pool = directional.ifEmpty { scrollables }
+        return pool.maxByOrNull { it.first }?.second
+    }
+
+    private fun sampleChildSignature(container: AccessibilityNodeInfo): String {
+        val count = runCatching { container.childCount }.getOrDefault(0)
+        return buildString {
+            append(count).append(':')
+            for (i in 0 until minOf(count, 4)) {
+                val child = runCatching { container.getChild(i) }.getOrNull() ?: continue
+                val rect = Rect().also { runCatching { child.getBoundsInScreen(it) } }
+                append(child.text?.toString()?.take(16).orEmpty()).append('@').append(rect.top).append(',')
+            }
+        }
     }
 
     private fun findFirstFocusedOrEditable(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -499,14 +950,40 @@ open class AccessibilityInteractionController(
     open suspend fun tapElement(spec: TargetResolutionSpec, observation: ScreenObservation): InteractionDispatchResult =
         backend.tapElement(spec, observation)
 
+    open suspend fun doubleTapElement(spec: TargetResolutionSpec, observation: ScreenObservation): InteractionDispatchResult =
+        backend.doubleTapElement(spec, observation)
+
     open suspend fun longPressElement(spec: TargetResolutionSpec, observation: ScreenObservation): InteractionDispatchResult =
         backend.longPressElement(spec, observation)
 
     open suspend fun tapCoordinates(x: Float, y: Float): InteractionDispatchResult =
         backend.tapCoordinates(x, y)
 
+    open suspend fun swipe(
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+        durationMs: Long = 320L
+    ): InteractionDispatchResult = backend.swipe(startX, startY, endX, endY, durationMs)
+
+    open suspend fun dragAndDrop(
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+        durationMs: Long = 750L
+    ): InteractionDispatchResult = backend.dragAndDrop(startX, startY, endX, endY, durationMs)
+
     open suspend fun typeText(spec: TargetResolutionSpec?, text: String, observation: ScreenObservation): InteractionDispatchResult =
         backend.typeText(spec, text, observation)
+
+    open suspend fun editTextField(
+        spec: TargetResolutionSpec?,
+        mode: TextEditMode,
+        text: String?,
+        observation: ScreenObservation
+    ): InteractionDispatchResult = backend.editTextField(spec, mode, text, observation)
 
     open suspend fun scroll(direction: ScrollDirection, targetViewId: String?): InteractionDispatchResult =
         backend.scroll(direction, targetViewId)
@@ -536,111 +1013,13 @@ open class AccessibilityInteractionController(
             spec: TargetResolutionSpec,
             preferEditable: Boolean = false
         ): TargetResolutionOutcome {
-            val rawNodes = observation.nodes
-            if (rawNodes.isEmpty()) {
-                return TargetResolutionOutcome.NotFound("No UI nodes observed on screen.")
+            return when (val g = UiElementGroundingEngine.resolve(observation, spec, preferEditable)) {
+                is GroundingOutcome.Resolved -> TargetResolutionOutcome.Resolved(g.node)
+                is GroundingOutcome.Ambiguous -> TargetResolutionOutcome.Ambiguous(g.candidates, g.reason)
+                is GroundingOutcome.LowConfidence -> TargetResolutionOutcome.Ambiguous(g.candidates, g.reason)
+                is GroundingOutcome.StaleSnapshot -> TargetResolutionOutcome.NotFound(g.reason)
+                is GroundingOutcome.NotFound -> TargetResolutionOutcome.NotFound(g.reason)
             }
-
-            // Explicit nodeIndex resolves unambiguously when present
-            spec.nodeIndex?.let { idx ->
-                val byIndex = rawNodes.firstOrNull { it.index == idx }
-                if (byIndex != null) return TargetResolutionOutcome.Resolved(byIndex)
-            }
-
-            val interactiveNodes = rawNodes.filter {
-                it.enabled && (it.bounds.width > 0 || it.bounds.height > 0 || it.editable || it.clickable)
-            }.ifEmpty { rawNodes.filter { it.enabled } }.ifEmpty { rawNodes }
-
-            val candidates = if (preferEditable || spec.editableOnly) {
-                interactiveNodes.filter { it.editable || it.role.contains("Field", ignoreCase = true) }
-                    .ifEmpty { interactiveNodes }
-            } else {
-                interactiveNodes
-            }
-
-            // Priority 1: View ID
-            spec.viewId?.let(::norm)?.takeIf { it.isNotEmpty() }?.let { vid ->
-                val cleanVid = vid.substringAfterLast('/')
-                val exactId = candidates.filter { normOrNull(it.viewId?.substringAfterLast('/')) == cleanVid }
-                pickUniqueOrAmbiguous(exactId, "view_id='$vid'")?.let { return it }
-                val partialId = candidates.filter { normOrNull(it.viewId)?.contains(cleanVid) == true }
-                pickUniqueOrAmbiguous(partialId, "view_id~='$vid'")?.let { return it }
-            }
-
-            // Priority 2: Exact contentDescription
-            spec.contentDescription?.let(::norm)?.takeIf { it.isNotEmpty() }?.let { q ->
-                val exactDesc = candidates.filter { normOrNull(it.contentDescription) == q }
-                pickUniqueOrAmbiguous(exactDesc, "content_description='$q'")?.let { return it }
-            }
-
-            // Priority 3: Exact visible text / hint
-            spec.text?.let(::norm)?.takeIf { it.isNotEmpty() }?.let { q ->
-                val exactText = candidates.filter { normOrNull(it.text) == q || normOrNull(it.hintText) == q }
-                pickUniqueOrAmbiguous(exactText, "text='$q'")?.let { return it }
-
-                val exactDescFallback = candidates.filter { normOrNull(it.contentDescription) == q }
-                pickUniqueOrAmbiguous(exactDescFallback, "text/desc='$q'")?.let { return it }
-            }
-
-            // Priority 4: Partial text / hint / contentDescription
-            spec.text?.let(::norm)?.takeIf { it.isNotEmpty() }?.let { q ->
-                val partialText = candidates.filter {
-                    normOrNull(it.text)?.contains(q) == true ||
-                        normOrNull(it.hintText)?.contains(q) == true
-                }
-                pickUniqueOrAmbiguous(partialText, "partial text '$q'")?.let { return it }
-
-                val partialDesc = candidates.filter { normOrNull(it.contentDescription)?.contains(q) == true }
-                pickUniqueOrAmbiguous(partialDesc, "partial desc '$q'")?.let { return it }
-            }
-
-            spec.contentDescription?.let(::norm)?.takeIf { it.isNotEmpty() }?.let { q ->
-                val partialDesc = candidates.filter { normOrNull(it.contentDescription)?.contains(q) == true }
-                pickUniqueOrAmbiguous(partialDesc, "partial content_description '$q'")?.let { return it }
-            }
-
-            // Priority 5: Role + structural context
-            spec.role?.let(::norm)?.takeIf { it.isNotEmpty() }?.let { r ->
-                val roleMatches = candidates.filter { normOrNull(it.role) == r }
-                pickUniqueOrAmbiguous(roleMatches, "role='$r'")?.let { return it }
-            }
-
-            if (preferEditable || spec.editableOnly) {
-                val focusedOrEditable = candidates.firstOrNull { it.focused && it.editable }
-                    ?: candidates.firstOrNull { it.editable }
-                if (focusedOrEditable != null) {
-                    return TargetResolutionOutcome.Resolved(focusedOrEditable)
-                }
-            }
-
-            return TargetResolutionOutcome.NotFound("No matching enabled UI element found.")
         }
-
-        private fun pickUniqueOrAmbiguous(
-            matches: List<ObservedUiNode>,
-            selectorDesc: String
-        ): TargetResolutionOutcome? {
-            if (matches.isEmpty()) return null
-            if (matches.size == 1) return TargetResolutionOutcome.Resolved(matches.first())
-
-            // Prefer clickable or editable nodes if only one is interactive
-            val actionable = matches.filter { it.clickable || it.editable }
-            if (actionable.size == 1) {
-                return TargetResolutionOutcome.Resolved(actionable.first())
-            }
-            val pool = actionable.ifEmpty { matches }
-            // Check if all tied items are identical nested duplicates or genuinely distinct targets
-            val distinctTexts = pool.map { "${normOrNull(it.text)}|${normOrNull(it.contentDescription)}|${it.viewId}" }.toSet()
-            return TargetResolutionOutcome.Ambiguous(
-                candidates = pool.take(5),
-                reason = "Ambiguous UI target for $selectorDesc: ${pool.size} matching nodes (${distinctTexts.size} distinct). Specify node_index or view_id."
-            )
-        }
-
-        private fun norm(value: String): String =
-            value.trim().replace(Regex("\\s+"), " ").lowercase()
-
-        private fun normOrNull(value: String?): String? =
-            value?.let(::norm)?.takeIf { it.isNotEmpty() }
     }
 }

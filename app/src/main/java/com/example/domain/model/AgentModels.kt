@@ -92,7 +92,9 @@ data class ResumableTaskSnapshot(
 data class AmbiguityCandidateItem(
     val displayName: String,
     val packageName: String,
-    val isLaunchable: Boolean = true
+    val isLaunchable: Boolean = true,
+    val subtitle: String? = null,
+    val nodeIndex: Int? = null
 )
 
 data class AmbiguitySelectionRequest(
@@ -100,7 +102,8 @@ data class AmbiguitySelectionRequest(
     val taskId: String,
     val query: String,
     val reason: String,
-    val candidates: List<AmbiguityCandidateItem>
+    val candidates: List<AmbiguityCandidateItem>,
+    val isUiElementSelection: Boolean = false
 )
 
 data class UserUnlockWaitRequest(
@@ -208,6 +211,7 @@ enum class AgentRunStatus(val label: String) {
     IDLE("Idle"),
     PREPARING("Preparing"),
     THINKING("Thinking"),
+    LOCATING_TARGET("Locating Target"),
     SELECTING_TOOL("Selecting Tool"),
     AWAITING_APPROVAL("Awaiting Approval"),
     WAITING_FOR_USER_UNLOCK("Waiting for Unlock"),
@@ -217,9 +221,11 @@ enum class AgentRunStatus(val label: String) {
     EXECUTING_TOOL("Executing Tool"),
     OBSERVING_RESULT("Observing Result"),
     REPLANNING("Replanning"),
+    RECOVERING("Recovering"),
     VERIFYING("Verifying"),
     PAUSED("Paused"),
     COMPLETED("Completed"),
+    PARTIALLY_COMPLETED("Partially Completed"),
     FAILED("Failed"),
     CANCELLED("Cancelled")
 }
@@ -289,7 +295,8 @@ data class TaskVerificationSummary(
     val unverifiedCompletedCount: Int = 0,
     val blockedCount: Int = 0,
     val remainingCount: Int = 0,
-    val objectiveVerified: Boolean = isVerified
+    val objectiveVerified: Boolean = isVerified,
+    val maxVerificationLevel: Int = if (objectiveVerified && isVerified) 4 else if (verifiedCompletedCount > 0) 2 else 0
 )
 
 sealed interface AgentEvent {
@@ -298,12 +305,24 @@ sealed interface AgentEvent {
     data class StatusChanged(
         override val taskId: String,
         val status: AgentRunStatus,
-        val message: String
+        val message: String,
+        val phase: AgentExecutionPhase? = null,
+        val currentSubgoal: String? = null,
+        val nextPlannedAction: String? = null
     ) : AgentEvent
 
     data class TextDelta(
         override val taskId: String,
         val accumulatedText: String
+    ) : AgentEvent
+
+    data class SubgoalProgressUpdated(
+        override val taskId: String,
+        val subgoal: String,
+        val lastVerifiedAction: String? = null,
+        val nextPlannedAction: String? = null,
+        val verificationLevel: VerificationLevel? = null,
+        val failureCategory: ComputerUseFailureCategory? = null
     ) : AgentEvent
 
     data class ToolSelected(

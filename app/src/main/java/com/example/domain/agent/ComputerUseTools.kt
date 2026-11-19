@@ -8,6 +8,7 @@ import com.example.domain.model.DeviceCapabilityType
 import com.example.domain.model.InstalledAppInfo
 import com.example.domain.model.ScrollDirection
 import com.example.domain.model.TargetResolutionSpec
+import com.example.domain.model.TextEditMode
 import com.example.domain.model.ToolDefinition
 import com.example.domain.model.ToolParameter
 import com.example.domain.model.ToolParameterType
@@ -25,10 +26,15 @@ object ComputerUseTools {
         YouTubePlayTool(runtime),
         ObserveScreenTool(runtime),
         WaitForScreenChangeTool(runtime),
+        WaitForElementTool(runtime),
         TapElementTool(runtime),
+        DoubleTapElementTool(runtime),
         LongPressElementTool(runtime),
         TapCoordinatesTool(runtime),
+        SwipeScreenTool(runtime),
+        DragAndDropTool(runtime),
         TypeTextTool(runtime),
+        EditTextFieldTool(runtime),
         ScrollScreenTool(runtime),
         PressBackTool(runtime),
         PressHomeTool(runtime),
@@ -51,11 +57,15 @@ internal fun InstalledAppInfo.toJson(): JSONObject = JSONObject()
 
 internal fun ComputerUseActionOutcome.toToolOutput(runtime: AndroidActionRuntime): ToolExecutionOutput {
     val json = runtime.formatOutcomeJson(this)
+    val sparseVisual = postObservation?.takeIf { it.hasSparseHierarchy }?.let { obs ->
+        runtime.consumeLatestSparseVisualAttachment(obs.snapshotId)
+    }
     return ToolExecutionOutput(
         outputJson = json,
         displaySummary = summary,
         isError = !success,
-        errorMessage = if (success) null else summary
+        errorMessage = if (success) null else summary,
+        visualAttachment = sparseVisual
     )
 }
 
@@ -63,16 +73,24 @@ internal fun parseTargetSpec(args: JSONObject, editableOnly: Boolean = false): T
     val nodeIndex = if (args.has("node_index") && !args.isNull("node_index")) {
         args.optInt("node_index", -1).takeIf { it >= 0 }
     } else null
+    val snapshotId = if (args.has("snapshot_id") && !args.isNull("snapshot_id")) {
+        args.optLong("snapshot_id", -1L).takeIf { it > 0L }
+    } else null
     val viewId = args.optString("view_id").trim().takeIf { it.isNotEmpty() }
     val text = args.optString("text").trim().takeIf { it.isNotEmpty() }
     val contentDesc = args.optString("content_description").trim().takeIf { it.isNotEmpty() }
         ?: args.optString("hint_or_label").trim().takeIf { it.isNotEmpty() }
+    val anchorContext = args.optString("anchor_context").trim().takeIf { it.isNotEmpty() }
+    val quarter = args.optString("region").trim().takeIf { it.isNotEmpty() }
     return TargetResolutionSpec(
         nodeIndex = nodeIndex,
         viewId = viewId,
         text = text,
         contentDescription = contentDesc,
-        editableOnly = editableOnly
+        editableOnly = editableOnly,
+        expectedSnapshotId = snapshotId,
+        anchorContext = anchorContext,
+        preferredQuarter = quarter
     )
 }
 
@@ -87,8 +105,9 @@ internal fun validateTargetSelectors(args: JSONObject): String? {
     val hasViewId = args.optString("view_id").isNotBlank()
     val hasText = args.optString("text").isNotBlank()
     val hasDesc = args.optString("content_description").isNotBlank()
-    if (!hasIndex && !hasViewId && !hasText && !hasDesc) {
-        return "Provide at least one target selector: 'node_index', 'view_id', 'text', or 'content_description'."
+    val hasAnchor = args.optString("anchor_context").isNotBlank()
+    if (!hasIndex && !hasViewId && !hasText && !hasDesc && !hasAnchor) {
+        return "Provide at least one target selector: 'node_index', 'view_id', 'text', 'content_description', or 'anchor_context'."
     }
     return null
 }
@@ -103,36 +122,11 @@ class ListInstalledAppsTool(
         name = "list_installed_apps",
         description = "List launchable Android applications installed on this device, optionally filtered or paginated.",
         parameters = listOf(
-            ToolParameter(
-                name = "query",
-                type = ToolParameterType.STRING,
-                description = "Optional search keyword to filter apps by name or package identifier.",
-                required = false
-            ),
-            ToolParameter(
-                name = "include_system_apps",
-                type = ToolParameterType.BOOLEAN,
-                description = "Whether to include preinstalled system apps. Defaults to true.",
-                required = false
-            ),
-            ToolParameter(
-                name = "include_non_launchable",
-                type = ToolParameterType.BOOLEAN,
-                description = "Whether to also include visible installed packages without a launcher activity. Defaults to false.",
-                required = false
-            ),
-            ToolParameter(
-                name = "limit",
-                type = ToolParameterType.INTEGER,
-                description = "Maximum number of apps to return (1 to 150). Defaults to 50.",
-                required = false
-            ),
-            ToolParameter(
-                name = "offset",
-                type = ToolParameterType.INTEGER,
-                description = "Zero-based pagination offset into discovered apps. Defaults to 0.",
-                required = false
-            )
+            ToolParameter("query", ToolParameterType.STRING, "Optional search keyword to filter apps by name or package identifier.", required = false),
+            ToolParameter("include_system_apps", ToolParameterType.BOOLEAN, "Whether to include preinstalled system apps. Defaults to true.", required = false),
+            ToolParameter("include_non_launchable", ToolParameterType.BOOLEAN, "Whether to also include visible installed packages without a launcher activity. Defaults to false.", required = false),
+            ToolParameter("limit", ToolParameterType.INTEGER, "Maximum number of apps to return (1 to 150). Defaults to 50.", required = false),
+            ToolParameter("offset", ToolParameterType.INTEGER, "Zero-based pagination offset into discovered apps. Defaults to 0.", required = false)
         ),
         riskCategory = ToolRiskCategory.READ_ONLY,
         resultSchemaDescription = "JSON object with totalDiscovered, count, offset, hasMore, nextOffset, visibilityNotice, and apps array.",
@@ -206,12 +200,7 @@ class FindAppTool(
         name = "find_app",
         description = "Check whether a specific Android application is installed and launchable by display name or package identifier.",
         parameters = listOf(
-            ToolParameter(
-                name = "query",
-                type = ToolParameterType.STRING,
-                description = "App name (e.g. 'YouTube', 'Chrome', 'Settings') or package ID (e.g. 'com.android.chrome').",
-                required = true
-            )
+            ToolParameter("query", ToolParameterType.STRING, "App name (e.g. 'YouTube', 'Chrome', 'Settings') or package ID (e.g. 'com.android.chrome').", required = true)
         ),
         riskCategory = ToolRiskCategory.READ_ONLY,
         resultSchemaDescription = "JSON object with status (FOUND/AMBIGUOUS/NOT_LAUNCHABLE/NOT_FOUND), display_name, package_name, launchable, app, and candidates.",
@@ -234,9 +223,7 @@ class FindAppTool(
         val query = args.getString("query").trim()
         return when (val outcome = runtime.findApp(query)) {
             is AppLookupOutcome.Found -> {
-                val altArr = JSONArray().apply {
-                    outcome.alternatives.forEach { put(it.toJson()) }
-                }
+                val altArr = JSONArray().apply { outcome.alternatives.forEach { put(it.toJson()) } }
                 val json = JSONObject()
                     .put("status", "FOUND")
                     .put("found", true)
@@ -245,15 +232,10 @@ class FindAppTool(
                     .put("launchable", outcome.app.isLaunchable)
                     .put("app", outcome.app.toJson())
                     .put("alternatives", altArr)
-                ToolExecutionOutput(
-                    outputJson = json,
-                    displaySummary = "Found ${outcome.app.appName} (${outcome.app.packageName})"
-                )
+                ToolExecutionOutput(outputJson = json, displaySummary = "Found ${outcome.app.appName} (${outcome.app.packageName})")
             }
             is AppLookupOutcome.Ambiguous -> {
-                val candArr = JSONArray().apply {
-                    outcome.candidates.forEach { put(it.toJson()) }
-                }
+                val candArr = JSONArray().apply { outcome.candidates.forEach { put(it.toJson()) } }
                 val json = JSONObject()
                     .put("status", "AMBIGUOUS")
                     .put("found", true)
@@ -263,12 +245,7 @@ class FindAppTool(
                     .put("recovery_action", "SELECT_AMBIGUOUS_APP")
                     .put("candidates", candArr)
                     .put("reason", outcome.reason)
-                ToolExecutionOutput(
-                    outputJson = json,
-                    displaySummary = outcome.reason,
-                    isError = true,
-                    errorMessage = outcome.reason
-                )
+                ToolExecutionOutput(outputJson = json, displaySummary = outcome.reason, isError = true, errorMessage = outcome.reason)
             }
             is AppLookupOutcome.NotLaunchable -> {
                 val json = JSONObject()
@@ -280,12 +257,7 @@ class FindAppTool(
                     .put("appName", outcome.appName)
                     .put("packageName", outcome.packageName)
                     .put("reason", outcome.reason)
-                ToolExecutionOutput(
-                    outputJson = json,
-                    displaySummary = outcome.reason,
-                    isError = true,
-                    errorMessage = outcome.reason
-                )
+                ToolExecutionOutput(outputJson = json, displaySummary = outcome.reason, isError = true, errorMessage = outcome.reason)
             }
             is AppLookupOutcome.NotFound -> {
                 val json = JSONObject()
@@ -295,12 +267,7 @@ class FindAppTool(
                     .put("query", outcome.query)
                     .put("visibilityRestricted", outcome.visibilityRestricted)
                     .put("reason", outcome.reason)
-                ToolExecutionOutput(
-                    outputJson = json,
-                    displaySummary = outcome.reason,
-                    isError = true,
-                    errorMessage = outcome.reason
-                )
+                ToolExecutionOutput(outputJson = json, displaySummary = outcome.reason, isError = true, errorMessage = outcome.reason)
             }
         }
     }
@@ -316,12 +283,7 @@ class LaunchAppTool(
         name = "launch_app",
         description = "Launch an installed Android application using its launcher intent and verify actual foreground package or detect blockers such as AppLock.",
         parameters = listOf(
-            ToolParameter(
-                name = "app",
-                type = ToolParameterType.STRING,
-                description = "Application display name or package name to open (e.g. 'YouTube', 'Chrome', 'com.android.settings').",
-                required = true
-            )
+            ToolParameter("app", ToolParameterType.STRING, "Application display name or package name to open (e.g. 'YouTube', 'Chrome', 'com.android.settings').", required = true)
         ),
         riskCategory = ToolRiskCategory.REVERSIBLE,
         resultSchemaDescription = "JSON object with status (FOREGROUND_VERIFIED/LAUNCH_DISPATCHED/BLOCKED_BY_APPLOCK/BLOCKED_BY_DIALOG/APP_LOADING/NOT_FOUND/NOT_LAUNCHABLE/LAUNCH_FAILED), target_package, foreground_package, requires_user_action, recovery_action, and message.",
@@ -363,15 +325,10 @@ class OpenUrlTool(
         name = "open_url",
         description = "Open an http or https URL directly via Android ACTION_VIEW and verify the foreground window.",
         parameters = listOf(
-            ToolParameter(
-                name = "url",
-                type = ToolParameterType.STRING,
-                description = "Complete http:// or https:// URL to open.",
-                required = true
-            )
+            ToolParameter("url", ToolParameterType.STRING, "Complete http:// or https:// URL to open.", required = true)
         ),
         riskCategory = ToolRiskCategory.REVERSIBLE,
-        resultSchemaDescription = "Action outcome JSON with opened URL, afterPackage, screenChanged, and updated screen observation.",
+        resultSchemaDescription = "Action outcome JSON with opened URL, afterPackage, verificationLevel, screenChanged, and updated screen observation.",
         timeoutMillis = 10_000L,
         isImplemented = true
     )
@@ -405,12 +362,7 @@ class YouTubePlayTool(
         name = "play_on_youtube",
         description = "Open YouTube search directly for the user's query, select a grounded matching video result when Accessibility is active, and verify real playback signals.",
         parameters = listOf(
-            ToolParameter(
-                name = "query",
-                type = ToolParameterType.STRING,
-                description = "Video, artist, or topic search query to play on YouTube.",
-                required = true
-            )
+            ToolParameter("query", ToolParameterType.STRING, "Video, artist, or topic search query to play on YouTube.", required = true)
         ),
         riskCategory = ToolRiskCategory.REVERSIBLE,
         resultSchemaDescription = "JSON object with status (PLAYBACK_STARTED/PLAYBACK_UNVERIFIED/VIDEO_SELECTED/RESULTS_OBSERVED/SEARCH_OPENED/BLOCKED_BY_APPLOCK/FAILED), query, searchUrl, target_package, foreground_package, selected_title, playback_signal, and message.",
@@ -479,29 +431,32 @@ class ObserveScreenTool(
     override val definition: ToolDefinition = ToolDefinition(
         id = "ui.observe_screen",
         name = "observe_screen",
-        description = "Observe the active Android window and return a compact structured representation of visible text, roles, bounds, and clickable/editable/scrollable UI elements with sensitive fields redacted.",
+        description = "Observe the active Android window and return a snapshot-stamped compact hierarchy (with parent links, IME keyboard visibility, dialog state, loading status, and OCR fallback when sparse).",
         parameters = emptyList(),
         riskCategory = ToolRiskCategory.READ_ONLY,
         requiredPermissions = listOf("ACCESSIBILITY_SERVICE"),
-        resultSchemaDescription = "JSON object with activePackageName, windowTitle, isInteractive, isDeviceLocked, isRestrictedWindow, nodeCount, truncated, and nodes array.",
+        resultSchemaDescription = "JSON object with snapshotId, activePackageName, windowTitle, keyboardVisible, dialogType, isLoadingLikely, hasSparseHierarchy, screenSummary, nodeCount, and nodes array.",
         timeoutMillis = 8_000L,
         isImplemented = true
     )
 
     override fun validateArguments(args: JSONObject): String? = null
-
     override fun describeAction(args: JSONObject): String = "Observe active Android screen"
 
     override suspend fun execute(args: JSONObject): ToolExecutionOutput {
         val obs = runtime.observeScreen()
         val json = runtime.screenObserver.toCompactJson(obs)
         val hasErr = obs.observationError != null
-        val summary = obs.observationError ?: "Observed ${obs.nodes.size} UI element(s) in ${obs.activePackageName ?: "active window"}"
+        val summary = obs.observationError ?: "Observed snapshot #${obs.snapshotId} (${obs.nodes.size} elements) in ${obs.activePackageName ?: "active window"}"
+        val sparseVisual = if (obs.hasSparseHierarchy) {
+            runtime.consumeLatestSparseVisualAttachment(obs.snapshotId)
+        } else null
         return ToolExecutionOutput(
             outputJson = json,
             displaySummary = summary,
             isError = hasErr && obs.nodes.isEmpty(),
-            errorMessage = if (hasErr && obs.nodes.isEmpty()) obs.observationError else null
+            errorMessage = if (hasErr && obs.nodes.isEmpty()) obs.observationError else null,
+            visualAttachment = sparseVisual
         )
     }
 }
@@ -514,24 +469,14 @@ class WaitForScreenChangeTool(
     override val definition: ToolDefinition = ToolDefinition(
         id = "ui.wait_for_screen_change",
         name = "wait_for_screen_change",
-        description = "Wait for the active screen window or UI hierarchy to change (e.g. after launching an app or tapping a navigation item) and return the new screen observation.",
+        description = "Wait for the active screen window or UI hierarchy to change (e.g. after launching an app or tapping a navigation item) and return the new snapshot.",
         parameters = listOf(
-            ToolParameter(
-                name = "timeout_ms",
-                type = ToolParameterType.INTEGER,
-                description = "Maximum wait time in milliseconds (300 to 10000). Defaults to 3000.",
-                required = false
-            ),
-            ToolParameter(
-                name = "expected_package",
-                type = ToolParameterType.STRING,
-                description = "Optional package name expected to appear in foreground.",
-                required = false
-            )
+            ToolParameter("timeout_ms", ToolParameterType.INTEGER, "Maximum wait time in milliseconds (300 to 10000). Defaults to 3000.", required = false),
+            ToolParameter("expected_package", ToolParameterType.STRING, "Optional package name expected to appear in foreground.", required = false)
         ),
         riskCategory = ToolRiskCategory.READ_ONLY,
         requiredPermissions = listOf("ACCESSIBILITY_SERVICE"),
-        resultSchemaDescription = "Action outcome JSON including screenChanged and latest post-observation screen.",
+        resultSchemaDescription = "Action outcome JSON including screenChanged and latest post-observation snapshot.",
         timeoutMillis = 12_000L,
         isImplemented = true
     )
@@ -558,6 +503,49 @@ class WaitForScreenChangeTool(
     }
 }
 
+class WaitForElementTool(
+    private val runtime: AndroidActionRuntime
+) : ExecutableTool {
+    override val requiredCapability: DeviceCapabilityType = DeviceCapabilityType.SCREEN_OBSERVATION
+
+    override val definition: ToolDefinition = ToolDefinition(
+        id = "ui.wait_for_element",
+        name = "wait_for_element",
+        description = "Wait for a specific UI element to appear on screen (e.g., while results load or dialog opens) up to timeout_ms.",
+        parameters = listOf(
+            ToolParameter("text", ToolParameterType.STRING, "Visible text of element to wait for.", required = false),
+            ToolParameter("content_description", ToolParameterType.STRING, "Content description of element to wait for.", required = false),
+            ToolParameter("view_id", ToolParameterType.STRING, "View resource ID or suffix of element to wait for.", required = false),
+            ToolParameter("timeout_ms", ToolParameterType.INTEGER, "Maximum wait time in ms (300 to 10000). Defaults to 4000.", required = false)
+        ),
+        riskCategory = ToolRiskCategory.READ_ONLY,
+        requiredPermissions = listOf("ACCESSIBILITY_SERVICE"),
+        resultSchemaDescription = "Action outcome JSON confirming element appearance and snapshot.",
+        timeoutMillis = 12_000L,
+        isImplemented = true
+    )
+
+    override fun validateArguments(args: JSONObject): String? {
+        if (args.has("timeout_ms") && !args.isNull("timeout_ms")) {
+            val raw = args.opt("timeout_ms")
+            if (raw !is Number || raw.toInt() !in 300..10_000) {
+                return "Parameter 'timeout_ms' must be an integer between 300 and 10000."
+            }
+        }
+        return validateTargetSelectors(args)
+    }
+
+    override fun describeAction(args: JSONObject): String {
+        val label = args.optString("text").ifBlank { args.optString("content_description") }.ifBlank { args.optString("view_id") }
+        return "Wait for element '$label'"
+    }
+
+    override suspend fun execute(args: JSONObject): ToolExecutionOutput {
+        val timeoutMs = args.optLong("timeout_ms", 4_000L).coerceIn(300L, 10_000L)
+        return runtime.waitForElement(parseTargetSpec(args), timeoutMs).toToolOutput(runtime)
+    }
+}
+
 class TapElementTool(
     private val runtime: AndroidActionRuntime
 ) : ExecutableTool {
@@ -566,16 +554,18 @@ class TapElementTool(
     override val definition: ToolDefinition = ToolDefinition(
         id = "ui.tap_element",
         name = "tap_element",
-        description = "Tap a visible UI element on screen resolved by node_index, view_id, text, or content_description, then verify resulting UI state.",
+        description = "Tap a visible UI or OCR element resolved by 9-level grounding (node_index + snapshot_id, view_id, text, content_description, or anchor_context), then verify resulting UI state.",
         parameters = listOf(
             ToolParameter("node_index", ToolParameterType.INTEGER, "Node index from latest observe_screen output.", required = false),
+            ToolParameter("snapshot_id", ToolParameterType.INTEGER, "Snapshot ID paired with node_index to guard against stale screens.", required = false),
             ToolParameter("view_id", ToolParameterType.STRING, "Accessibility view resource ID or suffix.", required = false),
             ToolParameter("text", ToolParameterType.STRING, "Visible text displayed on or inside the element.", required = false),
-            ToolParameter("content_description", ToolParameterType.STRING, "Accessibility content description of the element.", required = false)
+            ToolParameter("content_description", ToolParameterType.STRING, "Accessibility content description of the element.", required = false),
+            ToolParameter("anchor_context", ToolParameterType.STRING, "Nearby parent/sibling text to disambiguate duplicate buttons.", required = false)
         ),
         riskCategory = ToolRiskCategory.REVERSIBLE,
         requiredPermissions = listOf("ACCESSIBILITY_SERVICE"),
-        resultSchemaDescription = "Action outcome JSON with success, verificationDetail, screenChanged, and updated screen observation.",
+        resultSchemaDescription = "Action outcome JSON with verificationLevel (0..4), failureCategory, grounding rationale, screenChanged, and updated snapshot.",
         timeoutMillis = 10_000L,
         isImplemented = true
     )
@@ -592,6 +582,41 @@ class TapElementTool(
         runtime.tapElement(parseTargetSpec(args)).toToolOutput(runtime)
 }
 
+class DoubleTapElementTool(
+    private val runtime: AndroidActionRuntime
+) : ExecutableTool {
+    override val requiredCapability: DeviceCapabilityType = DeviceCapabilityType.ACCESSIBILITY_INTERACTION
+
+    override val definition: ToolDefinition = ToolDefinition(
+        id = "ui.double_tap_element",
+        name = "double_tap_element",
+        description = "Double-tap a visible UI element (e.g., to like, zoom, or activate controls requiring two quick taps).",
+        parameters = listOf(
+            ToolParameter("node_index", ToolParameterType.INTEGER, "Node index from latest observe_screen output.", required = false),
+            ToolParameter("snapshot_id", ToolParameterType.INTEGER, "Optional snapshot ID paired with node_index.", required = false),
+            ToolParameter("view_id", ToolParameterType.STRING, "Accessibility view resource ID or suffix.", required = false),
+            ToolParameter("text", ToolParameterType.STRING, "Visible text of the target element.", required = false),
+            ToolParameter("content_description", ToolParameterType.STRING, "Accessibility content description of the element.", required = false)
+        ),
+        riskCategory = ToolRiskCategory.REVERSIBLE,
+        requiredPermissions = listOf("ACCESSIBILITY_SERVICE"),
+        resultSchemaDescription = "Action outcome JSON with verificationLevel and updated screen observation.",
+        timeoutMillis = 10_000L,
+        isImplemented = true
+    )
+
+    override fun validateArguments(args: JSONObject): String? = validateTargetSelectors(args)
+
+    override fun describeAction(args: JSONObject): String {
+        val spec = parseTargetSpec(args)
+        val label = spec.text ?: spec.contentDescription ?: spec.viewId ?: "node #${spec.nodeIndex}"
+        return "Double-tap UI element '$label'"
+    }
+
+    override suspend fun execute(args: JSONObject): ToolExecutionOutput =
+        runtime.doubleTapElement(parseTargetSpec(args)).toToolOutput(runtime)
+}
+
 class LongPressElementTool(
     private val runtime: AndroidActionRuntime
 ) : ExecutableTool {
@@ -603,13 +628,14 @@ class LongPressElementTool(
         description = "Perform a long-press action on a visible UI element resolved by node_index, view_id, text, or content_description.",
         parameters = listOf(
             ToolParameter("node_index", ToolParameterType.INTEGER, "Node index from latest observe_screen output.", required = false),
+            ToolParameter("snapshot_id", ToolParameterType.INTEGER, "Optional snapshot ID paired with node_index.", required = false),
             ToolParameter("view_id", ToolParameterType.STRING, "Accessibility view resource ID or suffix.", required = false),
             ToolParameter("text", ToolParameterType.STRING, "Visible text of the target element.", required = false),
             ToolParameter("content_description", ToolParameterType.STRING, "Accessibility content description of the element.", required = false)
         ),
         riskCategory = ToolRiskCategory.REVERSIBLE,
         requiredPermissions = listOf("ACCESSIBILITY_SERVICE"),
-        resultSchemaDescription = "Action outcome JSON with verificationDetail and updated screen observation.",
+        resultSchemaDescription = "Action outcome JSON with verificationLevel and updated screen observation.",
         timeoutMillis = 10_000L,
         isImplemented = true
     )
@@ -641,7 +667,7 @@ class TapCoordinatesTool(
         ),
         riskCategory = ToolRiskCategory.REVERSIBLE,
         requiredPermissions = listOf("ACCESSIBILITY_SERVICE"),
-        resultSchemaDescription = "Action outcome JSON with verificationDetail and updated screen observation.",
+        resultSchemaDescription = "Action outcome JSON with verificationLevel and updated screen observation.",
         timeoutMillis = 10_000L,
         isImplemented = true
     )
@@ -665,6 +691,96 @@ class TapCoordinatesTool(
     }
 }
 
+class SwipeScreenTool(
+    private val runtime: AndroidActionRuntime
+) : ExecutableTool {
+    override val requiredCapability: DeviceCapabilityType = DeviceCapabilityType.ACCESSIBILITY_INTERACTION
+
+    override val definition: ToolDefinition = ToolDefinition(
+        id = "ui.swipe_screen",
+        name = "swipe_screen",
+        description = "Dispatch a custom touch swipe from (start_x, start_y) to (end_x, end_y) for horizontal carousels, drawers, sheets, or sliders.",
+        parameters = listOf(
+            ToolParameter("start_x", ToolParameterType.NUMBER, "Starting X pixel coordinate.", required = true),
+            ToolParameter("start_y", ToolParameterType.NUMBER, "Starting Y pixel coordinate.", required = true),
+            ToolParameter("end_x", ToolParameterType.NUMBER, "Ending X pixel coordinate.", required = true),
+            ToolParameter("end_y", ToolParameterType.NUMBER, "Ending Y pixel coordinate.", required = true),
+            ToolParameter("duration_ms", ToolParameterType.INTEGER, "Swipe duration in ms (150 to 1200). Defaults to 320.", required = false)
+        ),
+        riskCategory = ToolRiskCategory.REVERSIBLE,
+        requiredPermissions = listOf("ACCESSIBILITY_SERVICE"),
+        resultSchemaDescription = "Action outcome JSON with verificationLevel and updated screen observation.",
+        timeoutMillis = 10_000L,
+        isImplemented = true
+    )
+
+    override fun validateArguments(args: JSONObject): String? {
+        val coords = listOf("start_x", "start_y", "end_x", "end_y")
+        for (name in coords) {
+            val n = args.opt(name) as? Number ?: return "Missing numeric parameter '$name'."
+            if (n.toFloat() < 0f) return "Parameter '$name' must be non-negative."
+        }
+        return null
+    }
+
+    override fun describeAction(args: JSONObject): String =
+        "Swipe from (${args.opt("start_x")},${args.opt("start_y")}) to (${args.opt("end_x")},${args.opt("end_y")})"
+
+    override suspend fun execute(args: JSONObject): ToolExecutionOutput {
+        val sx = (args.get("start_x") as Number).toFloat()
+        val sy = (args.get("start_y") as Number).toFloat()
+        val ex = (args.get("end_x") as Number).toFloat()
+        val ey = (args.get("end_y") as Number).toFloat()
+        val dur = args.optLong("duration_ms", 320L).coerceIn(150L, 1_200L)
+        return runtime.swipeScreen(sx, sy, ex, ey, dur).toToolOutput(runtime)
+    }
+}
+
+class DragAndDropTool(
+    private val runtime: AndroidActionRuntime
+) : ExecutableTool {
+    override val requiredCapability: DeviceCapabilityType = DeviceCapabilityType.ACCESSIBILITY_INTERACTION
+
+    override val definition: ToolDefinition = ToolDefinition(
+        id = "ui.drag_and_drop",
+        name = "drag_and_drop",
+        description = "Perform a sustained touch drag-and-drop gesture from (start_x, start_y) to (end_x, end_y) for reordering items, seekbars, or sliders.",
+        parameters = listOf(
+            ToolParameter("start_x", ToolParameterType.NUMBER, "Drag start X pixel coordinate.", required = true),
+            ToolParameter("start_y", ToolParameterType.NUMBER, "Drag start Y pixel coordinate.", required = true),
+            ToolParameter("end_x", ToolParameterType.NUMBER, "Drop target X pixel coordinate.", required = true),
+            ToolParameter("end_y", ToolParameterType.NUMBER, "Drop target Y pixel coordinate.", required = true),
+            ToolParameter("duration_ms", ToolParameterType.INTEGER, "Drag duration in ms (450 to 1800). Defaults to 750.", required = false)
+        ),
+        riskCategory = ToolRiskCategory.REVERSIBLE,
+        requiredPermissions = listOf("ACCESSIBILITY_SERVICE"),
+        resultSchemaDescription = "Action outcome JSON with verificationLevel and updated screen observation.",
+        timeoutMillis = 10_000L,
+        isImplemented = true
+    )
+
+    override fun validateArguments(args: JSONObject): String? {
+        val coords = listOf("start_x", "start_y", "end_x", "end_y")
+        for (name in coords) {
+            val n = args.opt(name) as? Number ?: return "Missing numeric parameter '$name'."
+            if (n.toFloat() < 0f) return "Parameter '$name' must be non-negative."
+        }
+        return null
+    }
+
+    override fun describeAction(args: JSONObject): String =
+        "Drag from (${args.opt("start_x")},${args.opt("start_y")}) to (${args.opt("end_x")},${args.opt("end_y")})"
+
+    override suspend fun execute(args: JSONObject): ToolExecutionOutput {
+        val sx = (args.get("start_x") as Number).toFloat()
+        val sy = (args.get("start_y") as Number).toFloat()
+        val ex = (args.get("end_x") as Number).toFloat()
+        val ey = (args.get("end_y") as Number).toFloat()
+        val dur = args.optLong("duration_ms", 750L).coerceIn(450L, 1_800L)
+        return runtime.dragAndDrop(sx, sy, ex, ey, dur).toToolOutput(runtime)
+    }
+}
+
 class TypeTextTool(
     private val runtime: AndroidActionRuntime
 ) : ExecutableTool {
@@ -673,16 +789,17 @@ class TypeTextTool(
     override val definition: ToolDefinition = ToolDefinition(
         id = "ui.type_text",
         name = "type_text",
-        description = "Enter text into a targeted or currently focused editable field. Refuses password/PIN/OTP/CVV fields automatically.",
+        description = "Enter text into a targeted or focused editable field with focus verification, clipboard/paste fallback, and read-back verification. Refuses password/PIN/OTP/CVV fields automatically.",
         parameters = listOf(
             ToolParameter("text", ToolParameterType.STRING, "Text to enter into the input field.", required = true),
             ToolParameter("node_index", ToolParameterType.INTEGER, "Optional node index of the editable field.", required = false),
+            ToolParameter("snapshot_id", ToolParameterType.INTEGER, "Optional snapshot ID paired with node_index.", required = false),
             ToolParameter("view_id", ToolParameterType.STRING, "Optional view ID of the editable field.", required = false),
             ToolParameter("hint_or_label", ToolParameterType.STRING, "Optional hint or label text to locate the editable field.", required = false)
         ),
         riskCategory = ToolRiskCategory.REVERSIBLE,
         requiredPermissions = listOf("ACCESSIBILITY_SERVICE"),
-        resultSchemaDescription = "Action outcome JSON confirming text entry and updated screen observation.",
+        resultSchemaDescription = "Action outcome JSON confirming text entry read-back verification and updated screen observation.",
         timeoutMillis = 10_000L,
         isImplemented = true
     )
@@ -713,6 +830,55 @@ class TypeTextTool(
     }
 }
 
+class EditTextFieldTool(
+    private val runtime: AndroidActionRuntime
+) : ExecutableTool {
+    override val requiredCapability: DeviceCapabilityType = DeviceCapabilityType.ACCESSIBILITY_INTERACTION
+
+    override val definition: ToolDefinition = ToolDefinition(
+        id = "ui.edit_text_field",
+        name = "edit_text_field",
+        description = "Perform advanced text field operations: 'replace', 'append', 'clear', 'select_all', or 'paste'.",
+        parameters = listOf(
+            ToolParameter("mode", ToolParameterType.STRING, "Edit mode: replace, append, clear, select_all, or paste.", required = true, enumValues = listOf("replace", "append", "clear", "select_all", "paste")),
+            ToolParameter("text", ToolParameterType.STRING, "Text to insert/append/paste (required for replace, append; optional for paste).", required = false),
+            ToolParameter("node_index", ToolParameterType.INTEGER, "Optional node index of the editable field.", required = false),
+            ToolParameter("view_id", ToolParameterType.STRING, "Optional view ID of the editable field.", required = false),
+            ToolParameter("hint_or_label", ToolParameterType.STRING, "Optional hint or label to locate the field.", required = false)
+        ),
+        riskCategory = ToolRiskCategory.REVERSIBLE,
+        requiredPermissions = listOf("ACCESSIBILITY_SERVICE"),
+        resultSchemaDescription = "Action outcome JSON with verificationLevel and updated screen observation.",
+        timeoutMillis = 10_000L,
+        isImplemented = true
+    )
+
+    override fun validateArguments(args: JSONObject): String? {
+        val mode = TextEditMode.parse(args.optString("mode"))
+            ?: return "Parameter 'mode' must be one of: replace, append, clear, select_all, paste."
+        if ((mode == TextEditMode.REPLACE || mode == TextEditMode.APPEND) && args.opt("text") !is String) {
+            return "Parameter 'text' is required when mode is '${mode.apiValue}'."
+        }
+        return null
+    }
+
+    override fun describeAction(args: JSONObject): String {
+        val mode = args.optString("mode").lowercase()
+        val hint = args.optString("hint_or_label").ifBlank { args.optString("view_id") }
+        return if (hint.isNotBlank()) "Edit field '$hint' ($mode)" else "Edit focused field ($mode)"
+    }
+
+    override suspend fun execute(args: JSONObject): ToolExecutionOutput {
+        val mode = TextEditMode.parse(args.getString("mode")) ?: TextEditMode.REPLACE
+        val text = if (args.has("text") && !args.isNull("text")) args.optString("text") else null
+        val hasTarget = (args.has("node_index") && !args.isNull("node_index")) ||
+            args.optString("view_id").isNotBlank() ||
+            args.optString("hint_or_label").isNotBlank()
+        val spec = if (hasTarget) parseTargetSpec(args, editableOnly = true) else null
+        return runtime.editTextField(spec, mode, text).toToolOutput(runtime)
+    }
+}
+
 class ScrollScreenTool(
     private val runtime: AndroidActionRuntime
 ) : ExecutableTool {
@@ -721,25 +887,14 @@ class ScrollScreenTool(
     override val definition: ToolDefinition = ToolDefinition(
         id = "ui.scroll_screen",
         name = "scroll_screen",
-        description = "Scroll the active scrollable container or screen viewport in a direction ('down', 'up', 'left', or 'right').",
+        description = "Scroll the active or nested scrollable container in a direction ('down', 'up', 'left', or 'right') and verify visible viewport displacement.",
         parameters = listOf(
-            ToolParameter(
-                name = "direction",
-                type = ToolParameterType.STRING,
-                description = "Scroll direction: 'down', 'up', 'left', or 'right'.",
-                required = true,
-                enumValues = listOf("down", "up", "left", "right")
-            ),
-            ToolParameter(
-                name = "target_view_id",
-                type = ToolParameterType.STRING,
-                description = "Optional view ID of a specific scrollable container.",
-                required = false
-            )
+            ToolParameter("direction", ToolParameterType.STRING, "Scroll direction: 'down', 'up', 'left', or 'right'.", required = true, enumValues = listOf("down", "up", "left", "right")),
+            ToolParameter("target_view_id", ToolParameterType.STRING, "Optional view ID of a specific scrollable container.", required = false)
         ),
         riskCategory = ToolRiskCategory.REVERSIBLE,
         requiredPermissions = listOf("ACCESSIBILITY_SERVICE"),
-        resultSchemaDescription = "Action outcome JSON with screenChanged and updated screen observation.",
+        resultSchemaDescription = "Action outcome JSON with verificationLevel, screenChanged, and updated screen observation.",
         timeoutMillis = 10_000L,
         isImplemented = true
     )
@@ -768,11 +923,11 @@ class PressBackTool(
     override val definition: ToolDefinition = ToolDefinition(
         id = "ui.press_back",
         name = "press_back",
-        description = "Perform the global Android Back navigation action.",
+        description = "Perform the global Android Back navigation action (dismisses keyboard, closes dialogs, or navigates back).",
         parameters = emptyList(),
         riskCategory = ToolRiskCategory.REVERSIBLE,
         requiredPermissions = listOf("ACCESSIBILITY_SERVICE"),
-        resultSchemaDescription = "Action outcome JSON with verificationDetail and updated screen observation.",
+        resultSchemaDescription = "Action outcome JSON with verificationLevel and updated screen observation.",
         timeoutMillis = 8_000L,
         isImplemented = true
     )
@@ -795,7 +950,7 @@ class PressHomeTool(
         parameters = emptyList(),
         riskCategory = ToolRiskCategory.REVERSIBLE,
         requiredPermissions = listOf("ACCESSIBILITY_SERVICE"),
-        resultSchemaDescription = "Action outcome JSON with verificationDetail and updated screen observation.",
+        resultSchemaDescription = "Action outcome JSON with verificationLevel and updated screen observation.",
         timeoutMillis = 8_000L,
         isImplemented = true
     )
@@ -818,7 +973,7 @@ class PressEnterTool(
         parameters = emptyList(),
         riskCategory = ToolRiskCategory.REVERSIBLE,
         requiredPermissions = listOf("ACCESSIBILITY_SERVICE"),
-        resultSchemaDescription = "Action outcome JSON with verificationDetail and updated screen observation.",
+        resultSchemaDescription = "Action outcome JSON with verificationLevel and updated screen observation.",
         timeoutMillis = 8_000L,
         isImplemented = true
     )
@@ -839,12 +994,7 @@ class TakeScreenshotTool(
         name = "take_screenshot",
         description = "Capture a real screenshot of the current Android display using an active MediaProjection session, save it as PNG in app cache, and attach visual context when supported.",
         parameters = listOf(
-            ToolParameter(
-                name = "include_visual_context",
-                type = ToolParameterType.BOOLEAN,
-                description = "Whether to include image visual context for vision-capable models. Defaults to true.",
-                required = false
-            )
+            ToolParameter("include_visual_context", ToolParameterType.BOOLEAN, "Whether to include image visual context for vision-capable models. Defaults to true.", required = false)
         ),
         riskCategory = ToolRiskCategory.READ_ONLY,
         requiredPermissions = listOf("MEDIA_PROJECTION"),
@@ -854,7 +1004,6 @@ class TakeScreenshotTool(
     )
 
     override fun validateArguments(args: JSONObject): String? = null
-
     override fun describeAction(args: JSONObject): String = "Capture device screenshot via MediaProjection"
 
     override suspend fun execute(args: JSONObject): ToolExecutionOutput {
